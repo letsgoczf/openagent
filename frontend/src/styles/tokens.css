@@ -1,0 +1,11 @@
+:root {
+  --oa-bg: #0a0b10;
+  --oa-surface: #12141c;
+  --oa-border: #2a2e3d;
+  --oa-text: #e8eaf0;
+  --oa-muted: #8b92a8;
+  --oa-neon: #3dffce;
+  --oa-neon-dim: #7ef3d6;
+  --oa-radius: 10px;
+  --oa-focus: 0 0 0 2px var(--oa-bg), 0 0 0 4px var(--oa-neon);
+}

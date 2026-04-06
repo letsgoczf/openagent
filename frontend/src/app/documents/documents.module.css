@@ -1,0 +1,129 @@
+.wrap {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.back {
+  font-size: 0.9rem;
+}
+
+.title {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.lead {
+  color: var(--oa-muted);
+  margin: 0 0 1.25rem;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.label {
+  font-size: 0.85rem;
+  color: var(--oa-muted);
+}
+
+.form button {
+  margin-top: 0.5rem;
+  padding: 0.5rem 1.2rem;
+  border: none;
+  border-radius: var(--oa-radius);
+  background: linear-gradient(135deg, #3dffce, #2bc4ff);
+  color: #061018;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.form button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.error {
+  color: #ff6b8a;
+}
+
+.ok {
+  margin-top: 1rem;
+  color: var(--oa-muted);
+}
+
+.ok code {
+  color: var(--oa-neon);
+}
+
+.navMini {
+  margin-left: auto;
+  display: flex;
+  gap: 1rem;
+  font-size: 0.85rem;
+}
+
+.jobCard {
+  margin: 1.25rem 0;
+  padding: 1rem;
+  border-radius: var(--oa-radius);
+  border: 1px solid var(--oa-border);
+  background: var(--oa-surface);
+}
+
+.jobTitle {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
+
+.progress {
+  color: var(--oa-neon-dim);
+  font-size: 0.9rem;
+}
+
+.listSection {
+  margin-top: 2rem;
+}
+
+.listTitle {
+  font-size: 1.05rem;
+  margin: 0 0 0.75rem;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.table th,
+.table td {
+  text-align: left;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--oa-border);
+}
+
+.table th {
+  color: var(--oa-muted);
+  font-weight: 600;
+}
+
+.monoSmall {
+  font-family: ui-monospace, monospace;
+  font-size: 0.78rem;
+}
+
+.muted {
+  color: var(--oa-muted);
+}

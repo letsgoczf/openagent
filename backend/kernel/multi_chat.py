@@ -1,0 +1,198 @@
+"""
+多智能体 MVP：顺序两阶段（analyst 全链路 → synthesizer 整合），经 trace / WS 暴露 agent_* 事件。
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+
+from backend.kernel.blackboard import Blackboard
+from backend.kernel.run_context import RunContext
+from backend.kernel.trace import TraceWriter
+from backend.rag.citation import Citation
+from backend.rag.evidence_builder import EvidenceEntry
+from backend.runners.chat_runner import ChatRunner, ChatRunResult
+
+
+def _dedupe_citations(cites: list[Citation]) -> list[Citation]:
+    seen: set[str] = set()
+    out: list[Citation] = []
+    for c in cites:
+        if c.chunk_id in seen:
+            continue
+        seen.add(c.chunk_id)
+        out.append(c)
+    return out
+
+
+def _dedupe_evidence(entries: list[EvidenceEntry]) -> list[EvidenceEntry]:
+    seen: set[str] = set()
+    out: list[EvidenceEntry] = []
+    for e in entries:
+        if e.chunk_id in seen:
+            continue
+        seen.add(e.chunk_id)
+        out.append(e)
+    return out
+
+
+def run_sequential_two_agent(
+    *,
+    runner: ChatRunner,
+    ctx: RunContext,
+    trace: TraceWriter,
+    blackboard: Blackboard,
+    effective_query: str,
+    version_scope: list[str] | None,
+    stream: bool,
+    stream_writer: Callable[[str, str], None] | None,
+    prompt_addons: list[str] | None,
+) -> ChatRunResult:
+    """
+    Sub-agent 1（analyst）：与用户问题相同，走完整 retrieve → generate（流式可关闭）。
+    Sub-agent 2（synthesizer）：在 analyst 草稿上整合为最终答复（默认开启流式）。
+    """
+    addons = prompt_addons or []
+
+    def _muted(_kind: str, _text: str) -> None:
+        return
+
+    # ─── Phase 1: analyst ─────────────────────────────────────────
+    trace.emit(
+        "agent_spawned",
+        {
+            "agent_id": "sub_analyst",
+            "profile_id": "analyst",
+            "task_summary": "检索与基于证据的初答",
+        },
+    )
+    trace.emit(
+        "agent_progress",
+        {
+            "agent_id": "sub_analyst",
+            "step": 1,
+            "detail": "retrieve_and_generate",
+        },
+    )
+    try:
+        r1 = runner.run(
+            ctx,
+            effective_query,
+            trace,
+            blackboard,
+            version_scope=version_scope,
+            stream=stream,
+            stream_writer=_muted if stream else None,
+            prompt_addons=addons,
+        )
+    except Exception as e:  # noqa: BLE001
+        trace.emit(
+            "agent_failed",
+            {"agent_id": "sub_analyst", "message": str(e)},
+        )
+        raise
+
+    trace.emit(
+        "agent_completed",
+        {
+            "agent_id": "sub_analyst",
+            "output_summary": (r1.answer or "")[:800],
+        },
+    )
+
+    # ─── Phase 2: synthesizer ─────────────────────────────────────
+    draft = (r1.answer or "").strip()
+    if len(draft) > 12_000:
+        draft = draft[:12_000] + "\n…(truncated for synthesizer)"
+
+    follow_up = (
+        f"【用户原始问题】\n{effective_query}\n\n"
+        f"【分析智能体草稿】\n{draft}\n\n"
+        "请整合为一条完整、可直接给用户看的最终答复。"
+        "若草稿中已有引用脚注，请合理保留；需要时可补充说明。"
+    )
+
+    trace.emit(
+        "agent_spawned",
+        {
+            "agent_id": "sub_synthesizer",
+            "profile_id": "synthesizer",
+            "task_summary": "整合 analyst 输出并生成终稿",
+        },
+    )
+    trace.emit(
+        "agent_progress",
+        {
+            "agent_id": "sub_synthesizer",
+            "step": 1,
+            "detail": "merge_and_polish",
+        },
+    )
+    try:
+        r2 = runner.run(
+            ctx,
+            follow_up,
+            trace,
+            blackboard,
+            version_scope=version_scope,
+            stream=stream,
+            stream_writer=stream_writer if stream else None,
+            prompt_addons=addons,
+        )
+    except Exception as e:  # noqa: BLE001
+        trace.emit(
+            "agent_failed",
+            {"agent_id": "sub_synthesizer", "message": str(e)},
+        )
+        trace.emit(
+            "merge_started",
+            {"strategy": "fallback_analyst_only", "error": str(e)},
+        )
+        return ChatRunResult(
+            answer=r1.answer,
+            citations=r1.citations,
+            evidence_entries=r1.evidence_entries,
+            degraded=True,
+            run_id=ctx.run_id,
+            retrieval_state={
+                "multi_agent": True,
+                "analyst": r1.retrieval_state,
+                "synthesizer_error": str(e),
+            },
+            degrade_reason=f"synthesizer_failed:{e}",
+        )
+
+    trace.emit(
+        "agent_completed",
+        {
+            "agent_id": "sub_synthesizer",
+            "output_summary": (r2.answer or "")[:800],
+        },
+    )
+
+    trace.emit(
+        "merge_started",
+        {
+            "strategy": "sequential_two_phase",
+            "sub_agents": ["sub_analyst", "sub_synthesizer"],
+        },
+    )
+
+    citations = _dedupe_citations(r1.citations + r2.citations)
+    evidence_entries = _dedupe_evidence(r1.evidence_entries + r2.evidence_entries)
+    degraded = bool(r1.degraded or r2.degraded)
+    dr = r2.degrade_reason or r1.degrade_reason
+
+    return ChatRunResult(
+        answer=r2.answer,
+        citations=citations,
+        evidence_entries=evidence_entries,
+        degraded=degraded,
+        run_id=ctx.run_id,
+        retrieval_state={
+            "multi_agent": True,
+            "analyst": r1.retrieval_state,
+            "synthesizer": r2.retrieval_state,
+        },
+        degrade_reason=dr,
+    )

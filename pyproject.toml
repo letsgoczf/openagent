@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openagent"
+version = "0.1.0"
+description = "OpenAgent backend scaffold (single-user RAG assistant)"
+readme = "OPENAGENT_ARCHITECTURE.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "websockets>=13",
+    "openai>=1.40",
+    "ollama>=0.3",
+    "tiktoken>=0.7",
+    "qdrant-client>=1.11",
+    "pdfplumber>=0.11",
+    "python-pptx>=1.0",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["backend*"]

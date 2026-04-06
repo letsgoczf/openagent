@@ -1,0 +1,112 @@
+# OpenAgent 默认配置模板（单用户）
+# 可通过环境变量 OPENAGENT_CONFIG 指向其他文件。
+# 嵌套覆盖：OPENAGENT_MODELS__GENERATION__PROVIDER=ollama （双下划线表示层级）
+
+# 系统提示词（相对仓库根，可直接编辑该 Markdown）；null 则使用代码内置默认
+constitution_path: config/constitution.md
+
+# 多智能体 MVP：用户消息 strip 后以 trigger_prefix 开头则走 analyst→synthesizer 两阶段（前缀会从提问正文中去掉）
+# 关闭：orchestration.multi_agent.enabled: false 或 OPENAGENT_ORCHESTRATION__MULTI_AGENT__ENABLED=false
+orchestration:
+  multi_agent:
+    enabled: true
+    trigger_prefix: "[multi]"
+
+# ──────────── P6 Registry: 工具 (tools) ────────────
+# 每个工具: name, description, input_schema(JSON Schema), enabled, timeout_seconds, tags
+# 例: 搜索外部知识库 / SQL 查询等
+tools:
+  - name: web_search
+    description: "搜索互联网"
+    input_schema:
+      type: object
+      properties:
+        query: {type: string}
+      required: [query]
+    enabled: true
+    timeout_seconds: 10
+    tags: [search]
+
+# ──────────── P6 Registry: 技能 (skills) ────────────
+# 每个技能: skill_id, name, description, trigger_keywords, tools_allowlist, prompt_addon, enabled, tags
+# 当 query 命中 trigger_keywords 时自动注入 prompt_addon 并限制 tools_allowlist
+skills:
+  - skill_id: general
+    name: "通用助手"
+    description: "默认通用模式"
+    trigger_keywords: []
+    tools_allowlist: []  # 空 = 不限制
+    enabled: true
+    tags: [default]
+
+models:
+  generation:
+    provider: ollama
+    # 须与 `ollama list` 一致；你本机示例：qwen3.5:35b、QwenClaude:latest。带 -cloud / :cloud 走 ollama.com，易 502
+    model_id: qwen3.5:397b-cloud
+    # OpenAI/vLLM 等：此处填「环境变量名」字符串，如 OPENAI_API_KEY；勿写密钥数字。Ollama 可用 null
+    api_key_env: null
+    # Ollama / vLLM OpenAI 兼容接口的基础 URL
+    base_url: http://127.0.0.1:11434
+    # Ollama 思考模型：true 才会在 API 中返回 thinking（与 ollama run 中可见的推理过程一致）
+    think: true
+  # 稠密检索（Qdrant）用向量；可与 generation 使用不同 provider / model
+  embedding:
+    provider: ollama
+    model_id: nomic-embed-text:latest
+    api_key_env: null
+    base_url: http://127.0.0.1:11434
+    # nomic-embed-text 通常为 768；设为数字可避免启动时对 Ollama 发探测 embed（仍会对每条 query embed）
+    vector_dimensions: 768
+
+# 持久化：SQLite（全文与元数据）+ Qdrant（仅向量与 payload）
+storage:
+  sqlite_path: data/openagent.db
+  qdrant:
+    # 连接方式三选一（见 backend/storage/factory.py）：location > path > url
+    # 嵌入式本地库，无需单独 docker 起 6333（单机开发推荐）
+    location: null
+    path: data/qdrant_local
+    url: null
+    # Qdrant Cloud 时设置 api_key_env，并在环境中导出该变量
+    api_key_env: QDRANT_API_KEY
+    collection_name: openagent_chunks
+
+# Agent 可调用的知识检索与重排（实现模块见 backend/rag；HybridRAG 稠密+关键词加权融合见 README_DESIGN / demo）
+rag:
+  recall:
+    top_k_dense: 50
+    top_k_keyword: 30
+    max_candidates: 120
+    rerank_top_n: 10
+    # 与 HybridRAG(keyword_weight=0.3) 一致：w_keyword=0.3, w_dense=0.7（会在配置校验时归一化）
+    w_dense: 0.7
+    w_keyword: 0.3
+  # null 表示不过滤；可设为 [text, table] 等
+  allowed_origin_types: null
+  rerank:
+    # merged_score：dense+keyword 融合分排序；cross_encoder：预留交叉编码器
+    strategy: merged_score
+    model_id: null
+    provider: null
+    api_key_env: OPENAI_API_KEY
+    base_url: null
+
+tokenization:
+  provider: auto
+  tokenizer_model_id: null
+  count_scope: full_messages_by_template_cache
+
+ocr:
+  enabled: false
+  trigger:
+    mode: on_miss
+  max_ocr_pages: 8
+  min_confidence: 0.5
+  chunking: line
+  coord_space: page_normalized
+
+evidence:
+  entry_template_version: v1
+  max_evidence_entry_tokens: 300
+  snippet_truncation_version: v1
