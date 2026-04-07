@@ -69,9 +69,11 @@ test.describe("mock WebSocket sub-agents", () => {
     await page.getByLabel("消息").fill("任意问题");
     await page.getByRole("button", { name: "发送" }).click();
 
-    await expect(page.getByText("sub_mock_1")).toBeVisible();
-    await expect(page.getByText("分析子任务")).toBeVisible();
-    await expect(page.getByText("子任务结论摘要")).toBeVisible();
-    await expect(page.getByText("chat.agent_spawned")).toBeVisible();
+    // 严格模式：页面上多处 JSON trace 也包含 sub_mock_1，只断言「子智能体」区块内可见
+    const agents = page.getByRole("region", { name: "子智能体" });
+    await expect(agents.getByText("sub_mock_1", { exact: true })).toBeVisible();
+    await expect(agents.getByText("分析子任务")).toBeVisible();
+    await expect(agents.getByText("子任务结论摘要")).toBeVisible();
+    await expect(page.getByText("chat.agent_spawned").first()).toBeVisible();
   });
 });
