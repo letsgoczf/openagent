@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import uuid
+from unittest.mock import Mock
 
 from backend.config_loader import (
     EvidenceConfig,
@@ -16,6 +17,7 @@ from backend.config_loader import (
 )
 from backend.rag.budget import RetrievalBudget
 from backend.rag.recipes_bridge import hybrid_weights_from_demo_keyword_weight
+from backend.rag.keyword_recall import keyword_recall, sanitize_fts5_query
 from backend.models.tokenizer import TokenizerService
 from backend.rag.citation import build_citations, citation_chunk_ids_subset
 from backend.rag.evidence_builder import truncate_to_token_budget
@@ -222,3 +224,19 @@ def test_truncate_respects_budget() -> None:
     out = truncate_to_token_budget(t, tok, max_tokens=5)
     assert tok.count_tokens(out) <= 5
     assert len(out) < len(t)
+
+
+def test_sanitize_fts5_query_removes_operators() -> None:
+    q = 'foo-bar AND (baz:"x") NOT near/3'
+    sq = sanitize_fts5_query(q)
+    assert "-" not in sq
+    assert "(" not in sq and ")" not in sq
+    assert '"' not in sq
+    assert "and" not in sq and "not" not in sq
+
+
+def test_keyword_recall_fallback_on_store_error() -> None:
+    store = Mock()
+    store.query_fts5.side_effect = RuntimeError("fts5 boom")
+    out = keyword_recall(store, "a-b", top_k=5)  # type: ignore[arg-type]
+    assert out == []

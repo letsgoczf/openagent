@@ -57,6 +57,19 @@ def test_list_document_summaries(sqlite_db: SQLiteStore) -> None:
     assert rows[0]["version_status"] == "ready"
 
 
+def test_sqlite_delete_document_cascade(sqlite_db: SQLiteStore) -> None:
+    doc_id, ver_id, chunk_id = _seed_doc(sqlite_db, "to be deleted")
+    assert sqlite_db.get_chunk_by_id(chunk_id) is not None
+    assert sqlite_db.get_document_summary(doc_id) is not None
+    assert sqlite_db.list_version_ids_by_doc_id(doc_id) == [ver_id]
+
+    deleted = sqlite_db.delete_document(doc_id)
+    assert deleted is True
+    assert sqlite_db.get_document_summary(doc_id) is None
+    assert sqlite_db.list_version_ids_by_doc_id(doc_id) == []
+    assert sqlite_db.get_chunk_by_id(chunk_id) is None
+
+
 def test_qdrant_upsert_and_search() -> None:
     store = QdrantStore("test_chunks", vector_size=4, location=":memory:")
     store.ensure_collection()
@@ -95,4 +108,32 @@ def test_qdrant_version_filter_excludes() -> None:
     )
     out = store.search(vec, limit=5, version_id="other")
     assert not any(r.get("chunk_id") == "ca" for r in out)
+    store.close()
+
+
+def test_qdrant_delete_by_version_ids() -> None:
+    store = QdrantStore("t3", vector_size=3, location=":memory:")
+    store.ensure_collection()
+    vec = [0.2, 0.3, 0.4]
+    store.upsert_embedding(
+        vec,
+        chunk_id="c_keep",
+        version_id="v_keep",
+        origin_type="text",
+        unit_type="page",
+        unit_number=1,
+    )
+    store.upsert_embedding(
+        vec,
+        chunk_id="c_drop",
+        version_id="v_drop",
+        origin_type="text",
+        unit_type="page",
+        unit_number=1,
+    )
+    store.delete_by_version_ids(["v_drop"])
+    out = store.search(vec, limit=10)
+    ids = {r.get("chunk_id") for r in out}
+    assert "c_drop" not in ids
+    assert "c_keep" in ids
     store.close()

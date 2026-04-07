@@ -297,6 +297,40 @@ class SQLiteStore:
         cur = self._conn.execute(sql)
         return [dict(row) for row in cur.fetchall()]
 
+    def get_document_summary(self, doc_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            """
+            SELECT doc_id, file_name, file_type, created_at
+            FROM document
+            WHERE doc_id = ?
+            """,
+            (doc_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return dict(row)
+
+    def list_version_ids_by_doc_id(self, doc_id: str) -> list[str]:
+        rows = self._conn.execute(
+            """
+            SELECT version_id
+            FROM document_version
+            WHERE doc_id = ?
+            ORDER BY rowid ASC
+            """,
+            (doc_id,),
+        ).fetchall()
+        return [str(r["version_id"]) for r in rows]
+
+    def delete_document(self, doc_id: str) -> bool:
+        """
+        删除 document 及其关联版本/chunk/page_stats（依赖 FK CASCADE）。
+        返回是否实际删除了记录。
+        """
+        cur = self._conn.execute("DELETE FROM document WHERE doc_id = ?", (doc_id,))
+        self._conn.commit()
+        return cur.rowcount > 0
+
     def get_last_trace_event(
         self,
         run_id: str,

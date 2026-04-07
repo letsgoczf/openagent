@@ -126,6 +126,20 @@ class QdrantStore:
             )
         return out
 
+    def delete_by_version_ids(self, version_ids: list[str]) -> None:
+        if not version_ids:
+            return
+        if not self._client.collection_exists(self.collection_name):
+            return
+        self._client.delete(
+            collection_name=self.collection_name,
+            points_selector=Filter(
+                must=[
+                    FieldCondition(key="version_id", match=MatchAny(any=version_ids)),
+                ]
+            ),
+        )
+
     def close(self) -> None:
         if self._owns_client:
             self._client.close()

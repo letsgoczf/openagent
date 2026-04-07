@@ -119,6 +119,21 @@
   font-weight: 600;
 }
 
+.deleteBtn {
+  border: 1px solid #ff6b8a;
+  color: #ff6b8a;
+  background: transparent;
+  border-radius: 8px;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.deleteBtn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .monoSmall {
   font-family: ui-monospace, monospace;
   font-size: 0.78rem;

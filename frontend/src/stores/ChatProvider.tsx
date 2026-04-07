@@ -96,6 +96,23 @@ function parseList<T>(raw: unknown): T[] {
   return raw as T[];
 }
 
+function normalizeAnswerText(raw: unknown): string {
+  if (raw == null) return "";
+  if (typeof raw === "string") return raw;
+  if (typeof raw === "number" || typeof raw === "boolean") return String(raw);
+  if (typeof raw === "object") {
+    const obj = raw as Record<string, unknown>;
+    const cand = obj.content ?? obj.text ?? obj.answer;
+    if (typeof cand === "string") return cand;
+    try {
+      return JSON.stringify(raw, null, 2);
+    } catch {
+      return String(raw);
+    }
+  }
+  return String(raw);
+}
+
 export function ChatProvider({ children }: { children: React.ReactNode }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [status, setStatus] = useState<ChatStatus>("idle");
@@ -290,7 +307,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         }
 
         if (t === "chat.completed") {
-          const answer = String(data.answer ?? "");
+          const answer = normalizeAnswerText(data.answer);
           const finalText = assistantRef.current || answer;
           const think = thinkingRef.current;
           const citations = parseList<CitationDTO>(data.citations);

@@ -18,7 +18,7 @@ export default function HomePage() {
       <section id="content" className={styles.hero}>
         <h1 className={styles.h1}>本地智能体助手</h1>
         <p className={styles.lead}>
-          上传 PDF、通过 WebSocket 与智能体流式对话；侧栏可查看知识检索、工具调用与执行追踪。
+          上传文档（PDF/Office 等多种格式）、通过 WebSocket 与智能体流式对话；侧栏可查看知识检索、工具调用与执行追踪。
         </p>
         <div className={styles.cta}>
           <Link className={styles.primary} href="/chat">

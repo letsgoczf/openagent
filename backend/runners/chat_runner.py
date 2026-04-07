@@ -29,6 +29,7 @@ from backend.runners.composer import (
     build_messages,
     format_citations_footer,
     load_constitution_from_file,
+    trim_evidence_entries_to_budget,
 )
 from backend.runners.tool_loop import ToolGatewayStub, chat_until_no_tools, run_tool_loop_round
 from backend.storage.factory import build_qdrant_client
@@ -151,7 +152,22 @@ class ChatRunner:
         )
 
         const_text = load_constitution_from_file(self._constitution_path)
-        ev_block = build_evidence_block(rr.evidence_entries)
+        # 总 evidence 预算截断：避免多条合计超出模型上下文窗口
+        max_ev = self._settings.evidence.max_assembled_evidence_tokens
+        trimmed_entries = trim_evidence_entries_to_budget(
+            rr.evidence_entries, self._tokenizer, max_assembled_tokens=max_ev
+        )
+        if len(trimmed_entries) != len(rr.evidence_entries):
+            trace.emit(
+                "evidence_update",
+                {
+                    "trimmed": True,
+                    "before": len(rr.evidence_entries),
+                    "after": len(trimmed_entries),
+                    "max_assembled_evidence_tokens": max_ev,
+                },
+            )
+        ev_block = build_evidence_block(trimmed_entries)
         messages = build_messages(
             constitution=const_text,
             query=query,

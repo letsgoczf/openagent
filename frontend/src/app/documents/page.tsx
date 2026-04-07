@@ -29,6 +29,7 @@ export default function DocumentsPage() {
   const [rows, setRows] = useState<DocumentRow[]>([]);
   const [listErr, setListErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [deletingDocId, setDeletingDocId] = useState<string | null>(null);
   const [uploadErr, setUploadErr] = useState<string | null>(null);
   const [activeJob, setActiveJob] = useState<JobStatus | null>(null);
 
@@ -91,6 +92,29 @@ export default function DocumentsPage() {
     }
   }
 
+  async function onDelete(doc: DocumentRow) {
+    const ok = window.confirm(`确认删除文档「${doc.file_name}」？此操作不可恢复。`);
+    if (!ok) return;
+    setDeletingDocId(doc.doc_id);
+    setListErr(null);
+    try {
+      const res = await fetch(`${apiBase()}/v1/documents/${doc.doc_id}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as {
+          error?: { message?: string };
+        };
+        throw new Error(j.error?.message ?? res.statusText);
+      }
+      await loadList();
+    } catch (e) {
+      setListErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDeletingDocId(null);
+    }
+  }
+
   const prog = activeJob?.progress as {
     page?: number;
     total_pages?: number;
@@ -110,17 +134,17 @@ export default function DocumentsPage() {
         </nav>
       </header>
       <p className={styles.lead}>
-        上传 PDF 后后台异步入库；下方列表来自 SQLite，可查看版本状态。
+        上传常见办公与文本类文件后后台异步入库（PDF、Office、RTF、HTML、CSV/JSON/YAML、ODT、EPUB、邮件
+        .eml、源码与纯文本等）；下方列表来自 SQLite，可查看版本状态。
       </p>
 
       <form className={styles.form} onSubmit={onSubmit}>
-        <label className={styles.label} htmlFor="pdf">
-          选择 PDF
+        <label className={styles.label} htmlFor="doc">
+          选择文件
         </label>
         <input
-          id="pdf"
+          id="doc"
           type="file"
-          accept="application/pdf,.pdf"
           onChange={(e) => setFile(e.target.files?.[0] ?? null)}
           disabled={busy}
         />
@@ -178,6 +202,7 @@ export default function DocumentsPage() {
                 <th>类型</th>
                 <th>版本状态</th>
                 <th>创建时间</th>
+                <th>操作</th>
               </tr>
             </thead>
             <tbody>
@@ -187,6 +212,16 @@ export default function DocumentsPage() {
                   <td>{r.file_type}</td>
                   <td>{r.version_status ?? "—"}</td>
                   <td className={styles.monoSmall}>{r.doc_created_at}</td>
+                  <td>
+                    <button
+                      type="button"
+                      className={styles.deleteBtn}
+                      onClick={() => void onDelete(r)}
+                      disabled={deletingDocId === r.doc_id}
+                    >
+                      {deletingDocId === r.doc_id ? "删除中…" : "删除"}
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
