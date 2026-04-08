@@ -13,6 +13,25 @@ from backend.kernel.engine import KernelEngine
 
 ws_router = APIRouter()
 
+def _normalize_answer_text(raw: Any) -> str:
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, (int, float, bool)):
+        return str(raw)
+    # bytes-like
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            return raw.decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            return str(raw)
+    # dict/list/other objects
+    try:
+        return json.dumps(raw, ensure_ascii=False)
+    except TypeError:
+        return str(raw)
+
 
 @ws_router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
@@ -163,7 +182,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     {
                         "type": "chat.completed",
                         "run_id": result.run_id,
-                        "answer": result.answer,
+                        "answer": _normalize_answer_text(getattr(result, "answer", "")),
                         "degraded": result.degraded,
                         "degrade_reason": result.degrade_reason,
                         "citations": [c.model_dump() for c in result.citations],

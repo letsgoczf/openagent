@@ -129,6 +129,14 @@
   color: var(--oa-muted);
 }
 
+.multiToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.8rem;
+  color: var(--oa-muted);
+}
+
 .input {
   width: 100%;
   resize: vertical;

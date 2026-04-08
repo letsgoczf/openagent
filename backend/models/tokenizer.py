@@ -35,6 +35,18 @@ class TokenizerService:
             return 0
         return len(self._enc.encode(text))
 
+    def encode(self, text: str) -> list[int]:
+        """Return token ids for `text` using configured encoding."""
+        if not text:
+            return []
+        return list(self._enc.encode(text))
+
+    def decode(self, tokens: list[int]) -> str:
+        """Decode token ids back into text."""
+        if not tokens:
+            return ""
+        return self._enc.decode(tokens)
+
     def count_evidence_entry_tokens_v1(self, snippet: str) -> int:
         """EvidenceEntry v1: count snippet body only (template wrapper added later in rag layer)."""
         return self.count_tokens(snippet)

@@ -109,4 +109,6 @@ ocr:
 evidence:
   entry_template_version: v1
   max_evidence_entry_tokens: 300
+  # 多条 evidence 组装进 prompt 的总预算（不含 system prompt 与 user question）
+  max_assembled_evidence_tokens: 1800
   snippet_truncation_version: v1

@@ -1,13 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { EvidencePanel } from "@/components/evidence/EvidencePanel";
 import { useChat } from "@/hooks/useChat";
 import styles from "./chat.module.css";
 
 export default function ChatPage() {
   const [input, setInput] = useState("");
+  const [multiMode, setMultiMode] = useState(false);
+  const MULTI_MODE_STORAGE_KEY = "openagent.chat.multiMode";
   const {
     messages,
     sendQuery,
@@ -25,6 +27,17 @@ export default function ChatPage() {
   } = useChat();
 
   const streaming = status === "streaming" || status === "connecting";
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const raw = window.localStorage.getItem(MULTI_MODE_STORAGE_KEY);
+    if (raw === "1") setMultiMode(true);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(MULTI_MODE_STORAGE_KEY, multiMode ? "1" : "0");
+  }, [multiMode]);
 
   return (
     <div className={styles.layout}>
@@ -92,7 +105,15 @@ export default function ChatPage() {
             onSubmit={(e) => {
               e.preventDefault();
               if (!streaming) {
-                sendQuery(input);
+                const raw = input.trim();
+                const trigger = "[multi]";
+                const normalized = raw.startsWith(trigger)
+                  ? raw.slice(trigger.length).trim()
+                  : raw;
+                const finalQuery = multiMode
+                  ? `${trigger} ${normalized}`.trim()
+                  : normalized;
+                sendQuery(finalQuery);
                 setInput("");
               }
             }}
@@ -100,13 +121,22 @@ export default function ChatPage() {
             <label className={styles.label} htmlFor="q">
               消息
             </label>
+            <label className={styles.multiToggle}>
+              <input
+                type="checkbox"
+                checked={multiMode}
+                onChange={(e) => setMultiMode(e.target.checked)}
+                disabled={streaming}
+              />
+              多智能体协同
+            </label>
             <textarea
               id="q"
               className={styles.input}
               rows={3}
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="输入问题…（多智能体：前缀 [multi] ，需后端已启动）"
+              placeholder="输入问题…（可用下方开关启用多智能体）"
               disabled={streaming}
             />
             <button

@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 import hashlib
-import io
 import threading
 import uuid
 from pathlib import Path
 from typing import Any
 
-import pdfplumber
 from fastapi import APIRouter, File, UploadFile
 
-from backend.config_loader import OpenAgentSettings, load_config
 from backend.api.errors import ApiException
+from backend.config_loader import OpenAgentSettings, load_config
 from backend.kernel.trace import TraceWriter
+from backend.ingestion.chunking import chunk_text_by_tokens
+from backend.ingestion.document_extract import DocumentExtractionError, extract_document_pages
 from backend.models.embeddings import embed_text
 from backend.models.factory import create_tokenizer_service
 from backend.storage.factory import build_qdrant_client
@@ -29,15 +29,6 @@ def _resolve_embedding_dim(cfg: OpenAgentSettings) -> int:
         return dim
     # 兜底：探测 embedding 维度（会发起一次 embedding 请求）
     return len(embed_text("ping", settings=cfg))
-
-
-def _extract_pdf_pages(file_bytes: bytes) -> list[str]:
-    pages: list[str] = []
-    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-        for p in pdf.pages:
-            txt = p.extract_text() or ""
-            pages.append(txt)
-    return pages
 
 
 def _run_document_import_job(
@@ -80,60 +71,97 @@ def _run_document_import_job(
             status="processing",
         )
 
-        pages = _extract_pdf_pages(file_bytes)
-        total_pages = len(pages)
+        try:
+            pages = extract_document_pages(file_bytes, filename)
+        except DocumentExtractionError as e:
+            trace.emit("job_failed", {"error": str(e)})
+            sqlite.update_document_version_status(version_id, status="failed")
+            return
+        if not pages:
+            trace.emit("job_failed", {"error": "no extractable text in document"})
+            sqlite.update_document_version_status(version_id, status="failed")
+            return
+        total_units = len(pages)
 
         processed_chunks = 0
-        for page_index, page_text in enumerate(pages, start=1):
-            page_text = (page_text or "").strip()
-            if not page_text:
+        chunk_index = 0
+
+        is_pdf = filename.lower().endswith(".pdf") or file_bytes.startswith(b"%PDF-")
+
+        for unit_index, unit_text in enumerate(pages, start=1):
+            unit_text = (unit_text or "").strip()
+            # PDF：空页保留页码占位；非 PDF：空段直接跳过
+            if not unit_text and not is_pdf:
                 trace.emit(
                     "job_progress",
                     {
-                        "page": page_index,
-                        "total_pages": total_pages,
+                        "page": unit_index,
+                        "total_pages": total_units,
                         "processed_chunks": processed_chunks,
                     },
                 )
                 continue
 
-            chunk_id = str(
-                uuid.uuid5(uuid.NAMESPACE_URL, f"openagent:chunk:{version_id}:p{page_index}")
+            # 二次分段：按 token 预算切小块 + overlap
+            sub_chunks = chunk_text_by_tokens(
+                unit_text,
+                tokenizer,
+                max_chunk_tokens=800,
+                overlap_tokens=80,
             )
-            chunk_index = page_index - 1
-            origin_type = "text"
-            source_span: dict[str, Any] = {"page_number": page_index}
+            if not sub_chunks and unit_text:
+                sub_chunks = [unit_text]
 
-            sqlite.insert_chunk(
-                chunk_id=chunk_id,
-                version_id=version_id,
-                origin_type=origin_type,
-                chunk_index=chunk_index,
-                chunk_text=page_text,
-                source_span=source_span,
-                evidence_entry_tokens_v1=None,
-                evidence_snippet_text_v1=None,
-                page_number=page_index,
-                slide_number=None,
-                table_id=None,
-            )
+            for sub_i, chunk_text in enumerate(sub_chunks):
+                chunk_text = (chunk_text or "").strip()
+                if not chunk_text:
+                    continue
 
-            vec = embed_text(page_text, settings=cfg)
-            qdrant.upsert_embedding(
-                vec,
-                chunk_id=chunk_id,
-                version_id=version_id,
-                origin_type=origin_type,
-                unit_type="page",
-                unit_number=page_index,
-            )
+                chunk_id = str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"openagent:chunk:{version_id}:u{unit_index}:c{sub_i}",
+                    )
+                )
+                origin_type = "text"
+                source_span: dict[str, Any] = (
+                    {"page_number": unit_index, "subchunk_index": sub_i}
+                    if is_pdf
+                    else {"unit_index": unit_index, "subchunk_index": sub_i}
+                )
 
-            processed_chunks += 1
+                sqlite.insert_chunk(
+                    chunk_id=chunk_id,
+                    version_id=version_id,
+                    origin_type=origin_type,
+                    chunk_index=chunk_index,
+                    chunk_text=chunk_text,
+                    source_span=source_span,
+                    evidence_entry_tokens_v1=None,
+                    evidence_snippet_text_v1=None,
+                    page_number=(unit_index if is_pdf else None),
+                    slide_number=None,
+                    table_id=None,
+                )
+
+                vec = embed_text(chunk_text, settings=cfg)
+                qdrant.upsert_embedding(
+                    vec,
+                    chunk_id=chunk_id,
+                    version_id=version_id,
+                    origin_type=origin_type,
+                    unit_type=("page" if is_pdf else "unit"),
+                    unit_number=unit_index,
+                )
+
+                processed_chunks += 1
+                chunk_index += 1
+
             trace.emit(
                 "job_progress",
                 {
-                    "page": page_index,
-                    "total_pages": total_pages,
+                    "page": unit_index,
+                    "total_pages": total_units,
                     "processed_chunks": processed_chunks,
                 },
             )
@@ -154,11 +182,8 @@ def _run_document_import_job(
 @router.post("/import", response_model=dict)
 async def import_document(file: UploadFile = File(...)) -> dict[str, Any]:
     file_bytes = await file.read()
-    filename = file.filename or "upload.pdf"
-    file_type = file.content_type or "application/pdf"
-
-    if not filename.lower().endswith(".pdf") and "pdf" not in file_type.lower():
-        raise ApiException(code="document.unsupported_type", message="only PDF supported in P5")
+    filename = file.filename or "upload.bin"
+    file_type = file.content_type or "application/octet-stream"
 
     job_id = str(uuid.uuid4())
     t = threading.Thread(
@@ -178,5 +203,30 @@ async def list_documents() -> list[dict[str, Any]]:
     try:
         return sqlite.list_document_summaries()
     finally:
+        sqlite.close()
+
+
+@router.delete("/{doc_id}", response_model=dict)
+async def delete_document(doc_id: str) -> dict[str, Any]:
+    cfg = load_config()
+    sqlite = SQLiteStore(cfg.storage.sqlite_path)
+    dim = _resolve_embedding_dim(cfg)
+    qclient = build_qdrant_client(cfg.storage.qdrant)
+    qdrant = QdrantStore(cfg.storage.qdrant.collection_name, vector_size=dim, client=qclient)
+    try:
+        doc = sqlite.get_document_summary(doc_id)
+        if doc is None:
+            raise ApiException(
+                code="document.not_found",
+                message="document not found",
+                status_code=404,
+                detail={"doc_id": doc_id},
+            )
+        version_ids = sqlite.list_version_ids_by_doc_id(doc_id)
+        sqlite.delete_document(doc_id)
+        qdrant.delete_by_version_ids(version_ids)
+        return {"ok": True, "doc_id": doc_id, "deleted_versions": len(version_ids)}
+    finally:
+        qdrant.close()
         sqlite.close()
 

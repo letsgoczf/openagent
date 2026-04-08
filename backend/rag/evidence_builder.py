@@ -31,7 +31,13 @@ def build_location_summary(row: dict[str, Any]) -> str:
     elif page is not None:
         base = f"Page {page}"
     else:
-        base = "Unknown location"
+        # 非 PDF / 非 PPTX：回退到 source_span 中的 unit_index
+        span = row.get("source_span") or {}
+        unit = span.get("unit_index")
+        if isinstance(unit, int):
+            base = f"Unit {unit}"
+        else:
+            base = "Unknown location"
     if tbl:
         base += f", Table {tbl}"
     return base

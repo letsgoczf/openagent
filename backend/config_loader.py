@@ -173,6 +173,12 @@ class OcrConfig(BaseModel):
 class EvidenceConfig(BaseModel):
     entry_template_version: Literal["v1"] = "v1"
     max_evidence_entry_tokens: int = Field(default=300, ge=50, le=2000)
+    max_assembled_evidence_tokens: int = Field(
+        default=1800,
+        ge=200,
+        le=20000,
+        description="把多条 evidence 组装进单次 LLM 请求时的总 token 预算（不含 system prompt 与用户问题）。",
+    )
     snippet_truncation_version: str = "v1"
 
 

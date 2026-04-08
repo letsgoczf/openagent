@@ -105,12 +105,16 @@ def run_sequential_two_agent(
     if len(draft) > 12_000:
         draft = draft[:12_000] + "\n…(truncated for synthesizer)"
 
-    follow_up = (
+    synth_addon = (
+        "你是 synthesizer。请基于下述 analyst 草稿整合最终答复，保持事实一致，避免臆造。\n\n"
         f"【用户原始问题】\n{effective_query}\n\n"
         f"【分析智能体草稿】\n{draft}\n\n"
-        "请整合为一条完整、可直接给用户看的最终答复。"
-        "若草稿中已有引用脚注，请合理保留；需要时可补充说明。"
+        "要求：\n"
+        "1) 输出对用户友好、结构清晰的最终答案；\n"
+        "2) 若草稿已有引用编号，尽量保留其语义对应；\n"
+        "3) 不要把本段系统说明原样复述给用户。"
     )
+    phase2_addons = [*addons, synth_addon]
 
     trace.emit(
         "agent_spawned",
@@ -131,13 +135,13 @@ def run_sequential_two_agent(
     try:
         r2 = runner.run(
             ctx,
-            follow_up,
+            effective_query,
             trace,
             blackboard,
             version_scope=version_scope,
             stream=stream,
             stream_writer=stream_writer if stream else None,
-            prompt_addons=addons,
+            prompt_addons=phase2_addons,
         )
     except Exception as e:  # noqa: BLE001
         trace.emit(

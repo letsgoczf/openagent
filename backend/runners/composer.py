@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from backend.rag.evidence_builder import EvidenceEntry
+from backend.models.tokenizer import TokenizerService
 
 DEFAULT_CONSTITUTION = """You are OpenAgent, a careful assistant. Use the EVIDENCE section when it contains relevant facts; if evidence is empty or irrelevant, say so and answer from general knowledge without inventing document-specific citations. When evidence is used, align your statements with it."""
 
@@ -22,6 +23,40 @@ def build_evidence_block(entries: list[EvidenceEntry]) -> str:
             f"[{i}] chunk_id={e.chunk_id} | {e.location_summary} | {e.evidence_snippet_text_v1}"
         )
     return "\n".join(lines)
+
+
+def trim_evidence_entries_to_budget(
+    entries: list[EvidenceEntry],
+    tokenizer: TokenizerService,
+    *,
+    max_assembled_tokens: int,
+) -> list[EvidenceEntry]:
+    """
+    组装 EVIDENCE 时做总预算截断，避免“单条已截断但多条合计超上下文”。
+    预算口径：近似按每条 snippet token + 少量格式开销累加。
+    """
+    if max_assembled_tokens <= 0 or not entries:
+        return []
+
+    kept: list[EvidenceEntry] = []
+    used = 0
+    # 格式开销：编号、chunk_id、location 等（粗略常数，不追求完美，只求不爆）
+    overhead_per_entry = 36
+    for e in entries:
+        snip_tok = int(getattr(e, "evidence_entry_tokens_v1", 0) or 0)
+        # 对极端情况兜底：若 tokens 字段缺失，现场计数
+        if snip_tok <= 0 and e.evidence_snippet_text_v1:
+            snip_tok = tokenizer.count_tokens(e.evidence_snippet_text_v1)
+        need = snip_tok + overhead_per_entry
+        if kept and used + need > max_assembled_tokens:
+            break
+        if not kept and need > max_assembled_tokens:
+            # 至少保留 1 条（即使会略超，也比 0 条好；上游单条已有 max_evidence_entry_tokens 截断）
+            kept.append(e)
+            break
+        kept.append(e)
+        used += need
+    return kept
 
 
 def build_messages(

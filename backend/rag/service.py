@@ -94,13 +94,19 @@ class RetrievalService:
             version_ids=version_scope,
         )
         t_dense = time.perf_counter()
-        k_hits = keyword_recall(
-            self._sqlite,
-            query,
-            top_k=tk_k,
-            version_ids=version_scope,
-            allowed_origin_types=origin_list,
-        )
+        kw_error: str | None = None
+        try:
+            k_hits = keyword_recall(
+                self._sqlite,
+                query,
+                top_k=tk_k,
+                version_ids=version_scope,
+                allowed_origin_types=origin_list,
+            )
+        except Exception as e:  # noqa: BLE001
+            # keyword 通道兜底：dense-only
+            kw_error = str(e)
+            k_hits = []
         t_kw = time.perf_counter()
         merged = merge_and_dedup(
             d_hits,
@@ -153,6 +159,8 @@ class RetrievalService:
             "allowed_origin_types": origin_list,
             "rag_views": None,
         }
+        if kw_error:
+            state["keyword_recall_error"] = kw_error
 
         debug: dict[str, Any] | None = None
         if candidate_debug:
