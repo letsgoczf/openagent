@@ -6,6 +6,10 @@
 
 更完整的架构与事件约定见根目录 [`OPENAGENT_ARCHITECTURE.md`](./OPENAGENT_ARCHITECTURE.md)；开发里程碑见 [`docs/DEVELOPMENT_PLAN.md`](./docs/DEVELOPMENT_PLAN.md)。
 
+## 架构图
+
+![OpenAgent 架构图](./docs/openagent-architecture-figma.png)
+
 ## 技术栈
 
 | 层级 | 说明 |

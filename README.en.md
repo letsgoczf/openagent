@@ -6,6 +6,10 @@ Single-user **agent** application: Kernel orchestration, tools and Skills regist
 
 For full architecture and event contracts, see [`OPENAGENT_ARCHITECTURE.md`](./OPENAGENT_ARCHITECTURE.md). For milestones, see [`docs/DEVELOPMENT_PLAN.md`](./docs/DEVELOPMENT_PLAN.md).
 
+## Architecture diagram
+
+![OpenAgent architecture diagram](./docs/openagent-architecture-figma.png)
+
 ## Stack
 
 | Layer | Notes |
