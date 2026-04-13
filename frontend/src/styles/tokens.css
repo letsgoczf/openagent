@@ -1,11 +1,18 @@
 :root {
-  --oa-bg: #0a0b10;
-  --oa-surface: #12141c;
-  --oa-border: #2a2e3d;
-  --oa-text: #e8eaf0;
-  --oa-muted: #8b92a8;
-  --oa-neon: #3dffce;
-  --oa-neon-dim: #7ef3d6;
-  --oa-radius: 10px;
+  /* 深灰蓝基底 + 略提亮度，避免「纯黑控制台」感 */
+  --oa-bg: #0c0e16;
+  --oa-surface: #141820;
+  --oa-surface-2: #1c212c;
+  --oa-border: #2d3548;
+  --oa-text: #f0f2f9;
+  --oa-muted: #949db8;
+  --oa-neon: #4ae0c8;
+  --oa-neon-dim: #7dd4c4;
+  --oa-accent-blue: #5eb8ff;
+  --oa-radius: 12px;
   --oa-focus: 0 0 0 2px var(--oa-bg), 0 0 0 4px var(--oa-neon);
+  /* 页面环境光（用于 body 渐变，低饱和不抢眼） */
+  --oa-glow-teal: rgba(74, 224, 200, 0.11);
+  --oa-glow-blue: rgba(94, 184, 255, 0.09);
+  --oa-glow-violet: rgba(139, 124, 255, 0.06);
 }

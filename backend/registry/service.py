@@ -12,13 +12,29 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from backend.config_loader import OpenAgentSettings, load_config
+from backend.config_loader import OpenAgentSettings, load_config, resolve_repo_relative_path
 from backend.kernel.blackboard import Blackboard
 from backend.registry.rag_registry import RagCollection, RagRegistry
 from backend.registry.skill_registry import SkillManifest, SkillRegistry
 from backend.registry.builtin_tools import register_builtin_handlers
+from backend.registry.skill_tools import merge_skill_tool_aliases
 from backend.registry.tool_gateway import ToolCallResult, ToolGateway
 from backend.registry.tool_registry import ToolDefinition, ToolRegistry
+
+_READ_SKILL_REFERENCE_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "skill_id": {
+            "type": "string",
+            "description": "与 skills/<name>/ 目录名及 SKILL.md 中 name 一致",
+        },
+        "relative_path": {
+            "type": "string",
+            "description": "如 references/hints.md（禁止 .. 与 scripts/）",
+        },
+    },
+    "required": ["skill_id", "relative_path"],
+}
 
 
 @dataclass
@@ -115,9 +131,29 @@ def build_registry_service(settings: OpenAgentSettings) -> "RegistryService":
     ]
     tool_reg.load_from_config(tools_cfg)
 
-    # 2. Tool Gateway + 内置工具 handler（如 web_search）
+    bundle = getattr(settings, "skills_bundle", None)
+    if (
+        bundle is not None
+        and getattr(bundle, "enabled", False) is True
+        and getattr(bundle, "auto_register_read_skill_tool", True) is True
+        and tool_reg.get("read_skill_reference") is None
+    ):
+        tool_reg.register(
+            ToolDefinition(
+                name="read_skill_reference",
+                description=(
+                    "只读 Agent Skill 包内 references/ 或 assets/ 下的文本文件（渐进式披露 L3）"
+                ),
+                input_schema=dict(_READ_SKILL_REFERENCE_INPUT_SCHEMA),
+                enabled=True,
+                timeout_seconds=5.0,
+                tags=["skills", "read"],
+            )
+        )
+
+    # 2. Tool Gateway + 内置工具 handler（如 web_search、read_skill_reference）
     tool_gw = ToolGateway(tool_reg)
-    register_builtin_handlers(tool_gw, tool_reg)
+    register_builtin_handlers(tool_gw, tool_reg, settings)
 
     # 3. RAG Registry
     rag_reg = RagRegistry()
@@ -135,14 +171,24 @@ def build_registry_service(settings: OpenAgentSettings) -> "RegistryService":
             )
         )
 
-    # 4. Skill Registry
+    # 4. Skill Registry：先加载磁盘 SKILL.md，再用 openagent.yaml 的 skills 覆盖同 skill_id
     skill_reg = SkillRegistry()
+    if bundle is not None and getattr(bundle, "enabled", False) is True:
+        sd = getattr(bundle, "skills_dir", "skills")
+        skill_root = resolve_repo_relative_path(str(sd))
+        defer = getattr(bundle, "defer_skill_body", True)
+        defer_body = defer is True
+        skill_reg.load_from_skills_directory(skill_root, defer_body=defer_body)
     skills_cfg = getattr(settings, "skills", None) or []
     skills_cfg = [
         (s.model_dump() if hasattr(s, "model_dump") else s)
         for s in skills_cfg
     ]
     skill_reg.load_from_config(skills_cfg)
+
+    raw_aliases = getattr(settings.skills_bundle, "tool_name_aliases", None)
+    user_aliases = raw_aliases if isinstance(raw_aliases, dict) else {}
+    skill_reg.apply_tool_name_aliases(merge_skill_tool_aliases(user_aliases))
 
     return RegistryService(
         tool_registry=tool_reg,

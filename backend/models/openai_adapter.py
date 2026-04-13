@@ -15,6 +15,7 @@ class OpenAIAdapter(LLMAdapter):
         *,
         api_key: str | None = None,
         base_url: str | None = None,
+        default_temperature: float | None = None,
     ) -> None:
         kwargs: dict[str, Any] = {}
         if api_key is not None:
@@ -23,6 +24,7 @@ class OpenAIAdapter(LLMAdapter):
             kwargs["base_url"] = base_url
         self._client = OpenAI(**kwargs)
         self._model = model_id
+        self._default_temperature = default_temperature
 
     def chat(
         self,
@@ -38,8 +40,9 @@ class OpenAIAdapter(LLMAdapter):
             "messages": messages,
             "stream": stream,
         }
-        if temperature is not None:
-            req["temperature"] = temperature
+        eff_temp = temperature if temperature is not None else self._default_temperature
+        if eff_temp is not None:
+            req["temperature"] = eff_temp
         if max_tokens is not None:
             req["max_tokens"] = max_tokens
         if tools:

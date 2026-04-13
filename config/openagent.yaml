@@ -12,9 +12,42 @@ orchestration:
     enabled: true
     trigger_prefix: "[multi]"
 
+# 提示词模板：prompts/*.agent.md；顶层 LLM 按用户任务选择要注入的模板（每轮 +1 LLM，计入 Budget）
+# 消息中写 @<id>（与文件名 prompts/<id>.agent.md 一致）可固定注入该模板并跳过规划 LLM；无 @ 时仍自动规划（需 enabled: true）
+# 开启：prompt_management.enabled: true 或 OPENAGENT_PROMPT_MANAGEMENT__ENABLED=true
+prompt_management:
+  enabled: false
+  prompts_dir: prompts
+  planner_max_tokens: 512
+  max_templates_per_role: 3
+  max_chars_per_template: 12000
+
+# 会话级情节记忆（Phase A）：同 session_id 多轮；前端 WS 已传 session_id。关闭：memory.enabled: false
+memory:
+  enabled: true
+  session_max_turns: 16
+  session_max_history_tokens: 4000
+  # Phase B：滚动摘要（总轮数达到阈值且尾部超过 keep_recent_rounds 时折叠进摘要）
+  consolidation_enabled: true
+  consolidate_after_turns: 48
+  keep_recent_rounds: 8
+  consolidation_max_output_tokens: 512
+  rolling_summary_max_tokens: 1200
+  # Phase C：向量片段（规则抽取 + 稠密检索，不计入主 LLM 轮次）
+  fragments_enabled: true
+  fragment_top_k: 6
+  fragments_extract_max: 6
+  fragment_max_chars: 480
+  fragment_context_max_tokens: 900
+  # LLM 片段抽取（每轮 +1 LLM，失败则规则抽取）；环境变量示例：OPENAGENT_MEMORY__FRAGMENT_LLM_EXTRACTION_ENABLED=true
+  fragment_llm_extraction_enabled: false
+  fragment_llm_extraction_max_tokens: 500
+  # 检索后再用 LLM 融合片段（每轮 +1 LLM，失败则用 • 模板）
+  reconstruct_llm_enabled: false
+  reconstruct_llm_max_tokens: 450
+
 # ──────────── P6 Registry: 工具 (tools) ────────────
-# 每个工具: name, description, input_schema(JSON Schema), enabled, timeout_seconds, tags
-# 例: 搜索外部知识库 / SQL 查询等
+# 仅需声明你真正要用的工具。启用 skills_bundle 时会自动注册 read_skill_reference（L3 读 references/）
 tools:
   - name: web_search
     description: "搜索互联网"
@@ -26,6 +59,19 @@ tools:
     enabled: true
     timeout_seconds: 10
     tags: [search]
+
+# Agent Skills：仓库根下 skills/<name>/SKILL.md 即生效；Read/WebSearch 等别名与 read_skill_reference 由内置映射处理
+skills_bundle:
+  enabled: true
+  skills_dir: skills
+
+# LLM 根据技能 L1 目录（id/name/description）挑选 skill；与关键词可组合（hybrid）
+# 开启：skill_router.enabled: true 或 OPENAGENT_SKILL_ROUTER__ENABLED=true
+skill_router:
+  enabled: false
+  mode: hybrid
+  max_tokens: 256
+  max_skills_selected: 4
 
 # ──────────── P6 Registry: 技能 (skills) ────────────
 # 每个技能: skill_id, name, description, trigger_keywords, tools_allowlist, prompt_addon, enabled, tags
@@ -43,13 +89,15 @@ models:
   generation:
     provider: ollama
     # 须与 `ollama list` 一致；你本机示例：qwen3.5:35b、QwenClaude:latest。带 -cloud / :cloud 走 ollama.com，易 502
-    model_id: qwen3.5:397b-cloud
+    model_id: fredrezones55/qwen3.5-opus:27b
     # OpenAI/vLLM 等：此处填「环境变量名」字符串，如 OPENAI_API_KEY；勿写密钥数字。Ollama 可用 null
     api_key_env: null
     # Ollama / vLLM OpenAI 兼容接口的基础 URL
     base_url: http://127.0.0.1:11434
     # Ollama 思考模型：true 才会在 API 中返回 thinking（与 ollama run 中可见的推理过程一致）
     think: true
+    # 采样温度；null 表示不传参（用服务端默认）。也可用 OPENAGENT_MODELS__GENERATION__TEMPERATURE=0.3
+    temperature: 0.7
   # 稠密检索（Qdrant）用向量；可与 generation 使用不同 provider / model
   embedding:
     provider: ollama
@@ -71,6 +119,8 @@ storage:
     # Qdrant Cloud 时设置 api_key_env，并在环境中导出该变量
     api_key_env: QDRANT_API_KEY
     collection_name: openagent_chunks
+    # Phase C：会话记忆片段（与文档 chunk 不同集合）
+    memory_collection_name: openagent_memory
 
 # Agent 可调用的知识检索与重排（实现模块见 backend/rag；HybridRAG 稠密+关键词加权融合见 README_DESIGN / demo）
 rag:
@@ -91,6 +141,11 @@ rag:
     provider: null
     api_key_env: OPENAI_API_KEY
     base_url: null
+  # always：每轮都检索；adaptive：由模型先判定是否查知识库（多一次短 LLM，可省 embedding/RAG）。环境变量：OPENAGENT_RAG__RETRIEVAL_POLICY=adaptive
+  retrieval_policy: adaptive
+  retrieval_router_max_tokens: 80
+  # false：路由器 LLM 异常或 JSON 无法解析时不检索（收紧）；true：仍检索（宽松）
+  retrieval_router_fail_open: false
 
 tokenization:
   provider: auto

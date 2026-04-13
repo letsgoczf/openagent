@@ -375,8 +375,47 @@ class TestRegistryService:
         assert reason2 == "tool_not_in_allowlist"
 
 
+def test_build_registry_auto_read_skill_when_skills_bundle_enabled(tmp_path) -> None:
+    from backend.config_loader import (
+        EmbeddingConfig,
+        GenerationConfig,
+        ModelsConfig,
+        OpenAgentSettings,
+        SkillsBundleConfig,
+        StorageConfig,
+        TokenizationConfig,
+    )
+
+    skill_dir = tmp_path / "skills"
+    skill_dir.mkdir()
+    settings = OpenAgentSettings(
+        models=ModelsConfig(
+            generation=GenerationConfig(
+                provider="ollama",
+                model_id="m",
+                base_url="http://127.0.0.1:11434",
+            ),
+            embedding=EmbeddingConfig(
+                provider="ollama",
+                model_id="e",
+                base_url="http://127.0.0.1:11434",
+                vector_dimensions=4,
+            ),
+        ),
+        storage=StorageConfig(sqlite_path=str(tmp_path / "reg.db")),
+        tokenization=TokenizationConfig(provider="auto"),
+        tools=[],
+        skills_bundle=SkillsBundleConfig(enabled=True, skills_dir=str(skill_dir)),
+        skills=[],
+    )
+    svc = build_registry_service(settings)
+    t = svc.tool_registry.get("read_skill_reference")
+    assert t is not None and t.enabled is True
+
+
 def _make_settings():
     """构造一个最小 OpenAgentSettings，不依赖外部配置。"""
+    from types import SimpleNamespace
     from unittest.mock import MagicMock
 
     from backend.config_loader import OpenAgentSettings
@@ -384,6 +423,9 @@ def _make_settings():
     settings = MagicMock(spec=OpenAgentSettings)
     settings.tools = []
     settings.skills = []
+    settings.skills_bundle = SimpleNamespace(
+        enabled=False, skills_dir="skills", tool_name_aliases={}
+    )
     settings.rag = MagicMock()
     settings.rag.views = []
     settings.storage = MagicMock()

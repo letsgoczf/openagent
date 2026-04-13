@@ -29,6 +29,12 @@ class GenerationConfig(BaseModel):
         default=None,
         description="Ollama 专用：对支持的思考模型开启 think，才会返回/流式输出 thinking 过程；null 表示不传参。",
     )
+    temperature: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=2.0,
+        description="采样温度；null 表示不在请求里传 temperature，由服务端默认。",
+    )
 
 
 class EmbeddingConfig(BaseModel):
@@ -111,6 +117,23 @@ class RagConfig(BaseModel):
         description="若设置，仅保留这些 origin_type 的 chunk（README_DESIGN 2.2 可选过滤）",
     )
     rerank: RagRerankConfig = Field(default_factory=RagRerankConfig)
+    retrieval_policy: Literal["always", "adaptive"] = Field(
+        default="always",
+        description="always：每轮都执行 RAG；adaptive：先由 LLM 判定是否需要查知识库再检索（多耗 1 次 LLM）。",
+    )
+    retrieval_router_max_tokens: int = Field(
+        default=80,
+        ge=16,
+        le=512,
+        description="检索路由 LLM 输出 token 上限（仅 JSON）。",
+    )
+    retrieval_router_fail_open: bool = Field(
+        default=True,
+        description=(
+            "仅 adaptive 策略：路由器 LLM 报错或 JSON 无法解析时，true=仍执行 RAG（宽松），"
+            "false=跳过检索（收紧，减少无关文档命中）。"
+        ),
+    )
 
 
 class QdrantConfig(BaseModel):
@@ -136,6 +159,10 @@ class QdrantConfig(BaseModel):
     collection_name: str = Field(
         default="openagent_chunks",
         description="默认向量集合名（ingestion / retrieval 共用）",
+    )
+    memory_collection_name: str = Field(
+        default="openagent_memory",
+        description="Phase C：会话记忆片段向量集合（与文档 chunk 分离）",
     )
 
 
@@ -199,6 +226,136 @@ class OrchestrationConfig(BaseModel):
     multi_agent: MultiAgentConfig = Field(default_factory=MultiAgentConfig)
 
 
+class PromptManagementConfig(BaseModel):
+    """
+    顶层 Agent 从 ``prompts/*.agent.md`` 中选择要注入的模板（计入 Budget 的一次短 LLM）。
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="为 true 时每轮 run 先规划再注入所选模板正文到 system 侧 addon。",
+    )
+    prompts_dir: str = Field(
+        default="prompts",
+        description="相对仓库根的模板目录，仅匹配 *.agent.md。",
+    )
+    planner_max_tokens: int = Field(
+        default=512,
+        ge=64,
+        le=2048,
+        description="规划 LLM 输出 JSON 的 max_tokens。",
+    )
+    max_templates_per_role: int = Field(
+        default=3,
+        ge=0,
+        le=12,
+        description="每个角色（worker / synthesizer）最多采纳的模板数量上限。",
+    )
+    max_chars_per_template: int = Field(
+        default=12000,
+        ge=500,
+        le=200_000,
+        description="单模板注入 system 前的最大字符数（超出截断）。",
+    )
+
+
+class MemoryConfig(BaseModel):
+    """会话级情节记忆（Phase A）：同 session_id 多轮对话持久化与 prompt 注入。"""
+
+    enabled: bool = Field(
+        default=True,
+        description="为 false 时不读写 chat_session_turn，行为与旧版单轮一致。",
+    )
+    session_max_turns: int = Field(
+        default=16,
+        ge=0,
+        le=128,
+        description="注入 prompt 时最多包含的「轮数」：一轮 = user + assistant 各一条。",
+    )
+    session_max_history_tokens: int = Field(
+        default=4000,
+        ge=0,
+        le=200_000,
+        description="历史消息（不含本轮 EVIDENCE/QUESTION 拼装块）的近似 token 上限。",
+    )
+    consolidate_after_turns: int = Field(
+        default=48,
+        ge=1,
+        le=500,
+        description="Phase B：会话总轮数（user+assistant 算一轮）达到该值后才允许触发巩固。",
+    )
+    consolidation_enabled: bool = Field(
+        default=True,
+        description="Phase B：是否启用滚动摘要；关闭后仅 Phase A 全量/截断读取。",
+    )
+    keep_recent_rounds: int = Field(
+        default=8,
+        ge=1,
+        le=64,
+        description="Phase B：每次注入 prompt 时保留的最近轮数（verbatim）；更早内容进滚动摘要。",
+    )
+    consolidation_max_output_tokens: int = Field(
+        default=512,
+        ge=128,
+        le=8000,
+        description="Phase B：单次巩固 LLM 输出摘要的 token 上限（近似）。",
+    )
+    rolling_summary_max_tokens: int = Field(
+        default=1200,
+        ge=0,
+        le=32000,
+        description="Phase B：注入 system 的滚动摘要 token 上限（超出则截断）。",
+    )
+    fragments_enabled: bool = Field(
+        default=True,
+        description="Phase C：是否写入/检索记忆片段（向量库 + SQLite）。",
+    )
+    fragment_top_k: int = Field(
+        default=6,
+        ge=0,
+        le=32,
+        description="Phase C：按当前 query 向量检索的片段条数上限。",
+    )
+    fragments_extract_max: int = Field(
+        default=6,
+        ge=1,
+        le=24,
+        description="Phase C：每轮对话最多抽取并入库的片段条数。",
+    )
+    fragment_max_chars: int = Field(
+        default=480,
+        ge=80,
+        le=4000,
+        description="Phase C：单条片段文本最大字符数。",
+    )
+    fragment_context_max_tokens: int = Field(
+        default=900,
+        ge=0,
+        le=16000,
+        description="Phase C：注入 system 的「检索片段」总 token 上限。",
+    )
+    fragment_llm_extraction_enabled: bool = Field(
+        default=False,
+        description="用 LLM 从单轮对话抽取片段（JSON）；计入 Budget；失败则回退规则抽取。",
+    )
+    fragment_llm_extraction_max_tokens: int = Field(
+        default=500,
+        ge=64,
+        le=4000,
+        description="片段抽取 LLM 输出 token 上限。",
+    )
+    reconstruct_llm_enabled: bool = Field(
+        default=False,
+        description="检索到片段后，再用 LLM 融合为短上下文；计入 Budget；失败则用模板列表。",
+    )
+    reconstruct_llm_max_tokens: int = Field(
+        default=450,
+        ge=64,
+        le=4000,
+        description="重构 LLM 输出 token 上限。",
+    )
+
+
 # ─────────────────────────── P6 Registry ────────────────────────────
 
 
@@ -226,6 +383,60 @@ class SkillItemConfig(BaseModel):
     tags: list[str] = Field(default_factory=list)
 
 
+class SkillsBundleConfig(BaseModel):
+    """
+    磁盘技能包（agentskills.io 风格）：``skills_dir/<name>/SKILL.md``。
+    与 ``openagent.yaml`` 的 ``skills`` 合并；同 ``skill_id`` 时 YAML 覆盖磁盘。
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="为 false 时仅从 openagent.yaml 加载 skills。",
+    )
+    skills_dir: str = Field(
+        default="skills",
+        description="相对仓库根；每个子目录一项技能，且须含 SKILL.md。",
+    )
+    defer_skill_body: bool = Field(
+        default=True,
+        description="为 true 时磁盘 SKILL.md 正文仅在技能被关键词命中后读入（渐进式披露 L2）。",
+    )
+    tool_name_aliases: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "追加/覆盖内置别名（Read→read_skill_reference、WebSearch→web_search）。"
+            "值置空字符串表示丢弃该 token。"
+        ),
+    )
+    auto_register_read_skill_tool: bool = Field(
+        default=True,
+        description="skills_bundle 启用且 tools 中未声明 read_skill_reference 时自动注册该工具。",
+    )
+
+
+class SkillRouterConfig(BaseModel):
+    """
+    用 LLM 根据 ``list_l1_index()`` 选择 skill_id；与关键词匹配组合（hybrid）或仅用 LLM（llm_only）。
+    计入 Budget 的一次短调用；关闭后行为与仅关键词一致。
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="为 true 时在关键词之外（或替代）启用 LLM 选技能。",
+    )
+    mode: Literal["hybrid", "llm_only"] = Field(
+        default="hybrid",
+        description="hybrid：关键词命中 ∪ LLM 选择；llm_only：仅 LLM，解析失败或无结果时回退关键词。",
+    )
+    max_tokens: int = Field(default=256, ge=64, le=1024, description="路由 LLM 输出上限。")
+    max_skills_selected: int = Field(
+        default=4,
+        ge=1,
+        le=16,
+        description="LLM 最多返回的技能 id 数。",
+    )
+
+
 class OpenAgentSettings(BaseModel):
     models: ModelsConfig
     constitution_path: str | None = Field(
@@ -238,9 +449,13 @@ class OpenAgentSettings(BaseModel):
     ocr: OcrConfig = Field(default_factory=OcrConfig)
     evidence: EvidenceConfig = Field(default_factory=EvidenceConfig)
     orchestration: OrchestrationConfig = Field(default_factory=OrchestrationConfig)
+    prompt_management: PromptManagementConfig = Field(default_factory=PromptManagementConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     # P6 Registry 字段
     tools: list[ToolItemConfig] = Field(default_factory=list)
     skills: list[SkillItemConfig] = Field(default_factory=list)
+    skills_bundle: SkillsBundleConfig = Field(default_factory=SkillsBundleConfig)
+    skill_router: SkillRouterConfig = Field(default_factory=SkillRouterConfig)
 
 
 def repo_root() -> Path:

@@ -3,7 +3,7 @@
 export {
   useChat,
   ChatProvider,
-  type ChatMessage,
   type ChatStatus,
   type TraceLine,
 } from "@/stores/ChatProvider";
+export type { ChatMessage } from "@/types/chat";

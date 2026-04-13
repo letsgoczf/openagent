@@ -18,12 +18,14 @@ class OllamaAdapter(LLMAdapter):
         *,
         base_url: str | None = None,
         think: bool | str | None = None,
+        default_temperature: float | None = None,
     ) -> None:
         host = base_url or "http://127.0.0.1:11434"
         self._client = ollama.Client(host=host, **ollama_httpx_kwargs(host))
         self._host = host
         self._model = model_id
         self._think = think
+        self._default_temperature = default_temperature
 
     def _ollama_502_hint(self) -> str:
         m = self._model
@@ -48,8 +50,9 @@ class OllamaAdapter(LLMAdapter):
         tools: list[dict[str, Any]] | None = None,
     ) -> ChatResponse | Iterator[StreamPart]:
         options: dict[str, Any] = {}
-        if temperature is not None:
-            options["temperature"] = temperature
+        eff_temp = temperature if temperature is not None else self._default_temperature
+        if eff_temp is not None:
+            options["temperature"] = eff_temp
         if max_tokens is not None:
             options["num_predict"] = max_tokens
 

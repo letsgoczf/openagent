@@ -67,7 +67,7 @@ def test_engine_trace_events_sequence(
     mock_qclient.return_value = MagicMock()
 
     mock_factory.return_value = MagicMock()
-    mock_factory.return_value.chat.return_value = "assistant reply"
+    mock_factory.return_value.chat.return_value = "assistant reply [1]"
 
     ent = EvidenceEntry(
         chunk_id="c1",
@@ -98,8 +98,8 @@ def test_engine_trace_events_sequence(
     eng = KernelEngine(settings=settings)
     out = eng.run_chat("hello world", budget=Budget(max_llm_calls=3))
 
-    assert "assistant reply" in out.answer
-    assert "c1" in out.answer
+    assert out.answer.strip() == "assistant reply [1]"
+    assert out.citations[0].chunk_id == "c1"
 
     import sqlite3
 

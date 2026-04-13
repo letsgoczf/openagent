@@ -17,14 +17,25 @@ def create_llm_adapter(settings: OpenAgentSettings | None = None) -> LLMAdapter:
         key = None
         if g.api_key_env:
             key = os.environ.get(g.api_key_env) or None
-        return OpenAIAdapter(g.model_id, api_key=key, base_url=g.base_url)
+        return OpenAIAdapter(
+            g.model_id,
+            api_key=key,
+            base_url=g.base_url,
+            default_temperature=g.temperature,
+        )
     if g.provider == "ollama":
-        return OllamaAdapter(g.model_id, base_url=g.base_url, think=g.think)
+        return OllamaAdapter(
+            g.model_id,
+            base_url=g.base_url,
+            think=g.think,
+            default_temperature=g.temperature,
+        )
     if g.provider == "vllm":
         return VLLMAdapter(
             g.model_id,
             base_url=g.base_url,
             api_key_env=g.api_key_env,
+            default_temperature=g.temperature,
         )
     raise ValueError(f"Unknown generation provider: {g.provider}")
 

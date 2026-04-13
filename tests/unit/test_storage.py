@@ -137,3 +137,29 @@ def test_qdrant_delete_by_version_ids() -> None:
     assert "c_drop" not in ids
     assert "c_keep" in ids
     store.close()
+
+
+def test_ui_chat_state_roundtrip(sqlite_db: SQLiteStore) -> None:
+    active, sessions = sqlite_db.get_ui_chat_state()
+    assert active is None
+    assert sessions == []
+    sqlite_db.put_ui_chat_state(
+        active_session_id="s_1",
+        sessions=[
+            {
+                "id": "s_1",
+                "title": "hi",
+                "updatedAt": 42,
+                "messages": [{"id": "m1", "role": "user", "content": "x"}],
+                "lastEvidenceEntries": [],
+                "lastCitations": [],
+            }
+        ],
+    )
+    active, rows = sqlite_db.get_ui_chat_state()
+    assert active == "s_1"
+    assert len(rows) == 1
+    assert rows[0]["id"] == "s_1"
+    assert rows[0]["title"] == "hi"
+    assert rows[0]["updatedAt"] == 42
+    assert rows[0]["messages"][0]["content"] == "x"

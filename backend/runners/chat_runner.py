@@ -18,8 +18,9 @@ from backend.models.embeddings import embed_text
 from backend.models.factory import create_llm_adapter, create_tokenizer_service
 from backend.models.base import ChatResponse, LLMAdapter, StreamPart
 from backend.models.tokenizer import TokenizerService
-from backend.rag.citation import Citation
+from backend.rag.citation import Citation, build_citations
 from backend.rag.evidence_builder import EvidenceEntry
+from backend.rag.retrieval_router import llm_decides_need_retrieval
 from backend.rag.service import RetrievalResult, RetrievalService
 from backend.registry.tool_gateway import ToolGateway
 from backend.registry.tool_registry import ToolRegistry
@@ -27,7 +28,6 @@ from backend.registry.service import RegistryService
 from backend.runners.composer import (
     build_evidence_block,
     build_messages,
-    format_citations_footer,
     load_constitution_from_file,
     trim_evidence_entries_to_budget,
 )
@@ -46,6 +46,8 @@ class ChatRunResult:
     run_id: str
     retrieval_state: dict[str, Any]
     degrade_reason: str | None = None
+    # 思考模型推理过程；勿拼进 answer，由前端 <details> 展示
+    thinking: str | None = None
 
 
 class ChatRunner:
@@ -79,6 +81,10 @@ class ChatRunner:
         else:
             self._tool_gateway = ToolGatewayStub()
 
+    @property
+    def llm_adapter(self) -> LLMAdapter:
+        return self._llm
+
     def run(
         self,
         ctx: RunContext,
@@ -90,6 +96,9 @@ class ChatRunner:
         stream: bool = False,
         stream_writer: Callable[[str, str], None] | None = None,
         prompt_addons: list[str] | None = None,
+        conversation_history: list[dict[str, str]] | None = None,
+        rolling_summary: str | None = None,
+        reconstructed_memory: str | None = None,
     ) -> ChatRunResult:
         blackboard.append("run", "retrieving", {"query_len": len(query)})
         trace.emit("retrieval_update", {"phase": "start", "query_preview": query[:120]})
@@ -107,12 +116,25 @@ class ChatRunner:
                 degrade_reason="wall_clock",
             )
 
-        try:
-            qvec = embed_text(query, settings=self._settings)
-        except Exception as e:  # noqa: BLE001
-            ctx.mark_degraded(f"embedding_failed:{e}")
-            trace.emit("retrieval_update", {"error": str(e)})
-            qvec = []
+        need_retrieval = True
+        if self._settings.rag.retrieval_policy == "adaptive":
+            need_retrieval = llm_decides_need_retrieval(
+                query=query,
+                llm=self._llm,
+                budget=ctx.budget,
+                trace=trace,
+                max_tokens=self._settings.rag.retrieval_router_max_tokens,
+                fail_open=self._settings.rag.retrieval_router_fail_open,
+            )
+
+        qvec: list[float] = []
+        if need_retrieval:
+            try:
+                qvec = embed_text(query, settings=self._settings)
+            except Exception as e:  # noqa: BLE001
+                ctx.mark_degraded(f"embedding_failed:{e}")
+                trace.emit("retrieval_update", {"error": str(e)})
+                qvec = []
 
         rr: RetrievalResult | None = None
         # P6: 受 Registry 控制，仅允许访问已注册的 collection
@@ -127,10 +149,13 @@ class ChatRunner:
                 allowed_collection_ids=allowed_ids,
             )
         else:
+            rs: dict[str, Any] = {"dense_hits": 0, "keyword_hits": 0}
+            if not need_retrieval:
+                rs["router_skipped"] = True
             rr = RetrievalResult(
                 evidence_entries=[],
                 citations=[],
-                retrieval_state={"dense_hits": 0, "keyword_hits": 0},
+                retrieval_state=rs,
                 candidate_debug=None,
             )
 
@@ -145,6 +170,19 @@ class ChatRunner:
                 "chunk_ids": [e.chunk_id for e in rr.evidence_entries],
             },
         )
+
+        if ctx.budget.is_cancelled():
+            ctx.mark_degraded("user_cancelled")
+            trace.emit("completed", {"degraded": True, "reason": "user_cancelled"})
+            return ChatRunResult(
+                answer="",
+                citations=[],
+                evidence_entries=[],
+                degraded=True,
+                run_id=ctx.run_id,
+                retrieval_state=rr.retrieval_state,
+                degrade_reason="user_cancelled",
+            )
         blackboard.append(
             "evidence",
             "evidence_ready",
@@ -173,24 +211,59 @@ class ChatRunner:
             query=query,
             evidence_block=ev_block,
             prompt_addons=prompt_addons,
+            conversation_history=conversation_history,
+            rolling_summary=rolling_summary,
+            reconstructed_memory=reconstructed_memory,
         )
+
+        # 与 EVIDENCE 块编号一致：仅已装入 prompt 的 trimmed 条目（流式阶段即可点击 [n]）
+        cite_for_ui: list[Citation] = (
+            build_citations(trimmed_entries, self._sqlite) if trimmed_entries else []
+        )
+        if (
+            trimmed_entries
+            and len(cite_for_ui) < len(trimmed_entries)
+            and len(rr.citations) >= len(trimmed_entries)
+        ):
+            # SQLite 中尚无 chunk 行时 build_citations 会丢条；回退到检索阶段已组好的 citation 前缀
+            cite_for_ui = rr.citations[: len(trimmed_entries)]
+        if stream_writer:
+            trace.emit(
+                "citation_context",
+                {
+                    "citations": [c.model_dump() for c in cite_for_ui],
+                    "evidence_entries": [e.model_dump() for e in trimmed_entries],
+                },
+            )
+
+        if ctx.budget.is_cancelled():
+            ctx.mark_degraded("user_cancelled")
+            trace.emit("completed", {"degraded": True, "reason": "user_cancelled"})
+            return ChatRunResult(
+                answer="",
+                citations=cite_for_ui,
+                evidence_entries=trimmed_entries,
+                degraded=True,
+                run_id=ctx.run_id,
+                retrieval_state=rr.retrieval_state,
+                degrade_reason="user_cancelled",
+            )
 
         if not ctx.budget.can_call_llm() or ctx.budget.token_budget_exceeded():
             ctx.mark_degraded("llm_or_token_budget")
-            footer = format_citations_footer(rr.citations)
+            msg = "[Degraded: LLM budget exhausted]\n"
             trace.emit(
                 "completed",
                 {
                     "degraded": True,
                     "reason": "budget",
-                    "citations": len(rr.citations),
+                    "citations": len(cite_for_ui),
                 },
             )
-            msg = "[Degraded: LLM budget exhausted]\n"
             return ChatRunResult(
-                answer=msg + footer,
-                citations=rr.citations,
-                evidence_entries=rr.evidence_entries,
+                answer=msg,
+                citations=cite_for_ui,
+                evidence_entries=trimmed_entries,
                 degraded=True,
                 run_id=ctx.run_id,
                 retrieval_state=rr.retrieval_state,
@@ -200,6 +273,7 @@ class ChatRunner:
         # 带 tool 注册时发送 LLM tool schemas + 执行 tool loop
         tools = self._tool_schemas if self._tool_schemas else None
         body = ""
+        answer_thinking: str | None = None
         tool_calls: list[dict[str, Any]] | None = None
 
         try:
@@ -211,15 +285,20 @@ class ChatRunner:
                 # 新式：携带 tool_calls + thinking
                 body = raw.content
                 tool_calls = raw.tool_calls or None
-                if raw.thinking and stream_writer:
-                    for line in raw.thinking.splitlines():
-                        stream_writer("thinking", line + "\n")
+                if raw.thinking:
+                    answer_thinking = raw.thinking
+                    if stream_writer:
+                        for line in raw.thinking.splitlines():
+                            stream_writer("thinking", line + "\n")
             else:
                 # 流式：迭代 StreamPart
                 tool_calls = None
                 parts: list[str] = []
                 think_parts: list[str] = []
                 for item in raw:
+                    if ctx.budget.is_cancelled():
+                        ctx.mark_degraded("user_cancelled")
+                        break
                     if isinstance(item, tuple):
                         kind, chunk = item[0], item[1]
                         if kind == "content":
@@ -239,24 +318,17 @@ class ChatRunner:
                         parts.append(str(item))
                         if stream_writer:
                             stream_writer("content", str(item))
-                body_only = "".join(parts)
+                body = "".join(parts)
                 if think_parts:
-                    body = (
-                        "--- Thinking ---\n"
-                        + "".join(think_parts)
-                        + "\n--- /Thinking ---\n\n"
-                        + body_only.strip()
-                    )
-                else:
-                    body = body_only
+                    answer_thinking = "".join(think_parts)
         except Exception as e:  # noqa: BLE001
             ctx.mark_degraded(f"llm_error:{e}")
             trace.emit("completed", {"degraded": True, "error": str(e)})
-            footer = format_citations_footer(rr.citations)
+            err_body = f"[LLM error: {e}]\n"
             return ChatRunResult(
-                answer=f"[LLM error: {e}]\n" + footer,
-                citations=rr.citations,
-                evidence_entries=rr.evidence_entries,
+                answer=err_body,
+                citations=cite_for_ui,
+                evidence_entries=trimmed_entries,
                 degraded=True,
                 run_id=ctx.run_id,
                 retrieval_state=rr.retrieval_state,
@@ -264,6 +336,30 @@ class ChatRunner:
             )
 
         ctx.budget.record_llm_call()
+
+        if ctx.budget.is_cancelled():
+            ctx.mark_degraded("user_cancelled")
+            body_stripped = body.strip()
+            trace.emit(
+                "completed",
+                {
+                    "answer_chars": len(body_stripped),
+                    "citations": len(cite_for_ui),
+                    "degraded": True,
+                    "reason": "user_cancelled",
+                    "streamed": stream,
+                },
+            )
+            return ChatRunResult(
+                answer=body_stripped,
+                citations=cite_for_ui,
+                evidence_entries=trimmed_entries,
+                degraded=True,
+                run_id=ctx.run_id,
+                retrieval_state=rr.retrieval_state,
+                degrade_reason="user_cancelled",
+                thinking=(answer_thinking.strip() or None) if answer_thinking else None,
+            )
 
         # tool loop 调用（仅当有真实 gateway 且有 tool_calls 时）
         if tool_calls and not isinstance(self._tool_gateway, ToolGatewayStub):
@@ -312,31 +408,29 @@ class ChatRunner:
 
             trace.emit("tool_loop_done", {"tool_calls": len(tool_calls)})
 
-        footer = format_citations_footer(rr.citations)
         body_stripped = body.strip()
-        full_answer = body_stripped + footer
-        if stream and stream_writer and footer:
-            stream_writer("citations", footer)
+        full_answer = body_stripped
 
         trace.emit(
             "completed",
             {
                 "answer_chars": len(body_stripped),
-                "citations": len(rr.citations),
+                "citations": len(cite_for_ui),
                 "degraded": ctx.degraded,
                 "streamed": stream,
             },
         )
-        blackboard.append("run", "completed", {"citations": len(rr.citations)})
+        blackboard.append("run", "completed", {"citations": len(cite_for_ui)})
 
         return ChatRunResult(
             answer=full_answer,
-            citations=rr.citations,
-            evidence_entries=rr.evidence_entries,
+            citations=cite_for_ui,
+            evidence_entries=trimmed_entries,
             degraded=ctx.degraded,
             run_id=ctx.run_id,
             retrieval_state=rr.retrieval_state,
             degrade_reason=ctx.degrade_reason,
+            thinking=(answer_thinking.strip() or None) if answer_thinking else None,
         )
 
 

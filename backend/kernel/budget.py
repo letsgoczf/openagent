@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -15,6 +16,7 @@ class Budget:
     max_tool_rounds: int = 4
     wall_clock_s: float = 120.0
     token_budget: int | None = None
+    cancel_event: threading.Event | None = None  # WebSocket chat.stop 协作式中断
 
     llm_calls_used: int = 0
     tool_rounds_used: int = 0
@@ -56,3 +58,7 @@ class Budget:
         if self.token_budget is None:
             return False
         return self.tokens_used >= self.token_budget
+
+    def is_cancelled(self) -> bool:
+        ev = self.cancel_event
+        return ev is not None and ev.is_set()

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from backend.rag.evidence_builder import EvidenceEntry
 from backend.models.tokenizer import TokenizerService
 
-DEFAULT_CONSTITUTION = """You are OpenAgent, a careful assistant. Use the EVIDENCE section when it contains relevant facts; if evidence is empty or irrelevant, say so and answer from general knowledge without inventing document-specific citations. When evidence is used, align your statements with it."""
+DEFAULT_CONSTITUTION = """You are OpenAgent, a careful assistant. Use the EVIDENCE section when it contains relevant facts; if evidence is empty or irrelevant, say so and answer from general knowledge without inventing document-specific citations. When you use facts from EVIDENCE, cite them inline using the same bracket numbers as in that block, e.g. [1], [2] — do not add a separate citations appendix after your reply."""
 
 
 def load_constitution_from_file(path: Path | None) -> str:
@@ -59,17 +60,43 @@ def trim_evidence_entries_to_budget(
     return kept
 
 
+_MEMORY_SUFFIX = (
+    "\n\n[Memory] Prior messages in this chat are conversation memory only; they are not "
+    "indexed document evidence. Use bracket numbers [1], [2], … only for facts from the "
+    "EVIDENCE block in the latest user message below."
+)
+
+
 def build_messages(
     *,
     constitution: str,
     query: str,
     evidence_block: str,
     prompt_addons: list[str] | None = None,
+    conversation_history: list[dict[str, str]] | None = None,
+    rolling_summary: str | None = None,
+    reconstructed_memory: str | None = None,
 ) -> list[dict[str, str]]:
     system = constitution.strip()
     if prompt_addons:
         addon_block = "\n".join(prompt_addons)
         system = system.rstrip() + "\n\n" + addon_block
+    if rolling_summary and rolling_summary.strip():
+        system = (
+            system.rstrip()
+            + "\n\n[Earlier conversation summary — compressed; not verbatim; "
+            "not indexed document evidence]\n"
+            + rolling_summary.strip()
+        )
+    if reconstructed_memory and reconstructed_memory.strip():
+        system = (
+            system.rstrip()
+            + "\n\n[Retrieved memory fragments — not document evidence; "
+            "do not cite chunk_id]\n"
+            + reconstructed_memory.strip()
+        )
+    if conversation_history:
+        system = system.rstrip() + _MEMORY_SUFFIX
     user = (
         "EVIDENCE:\n"
         + evidence_block
@@ -77,10 +104,26 @@ def build_messages(
         + query.strip()
         + "\n\nAnswer concisely. If you rely on evidence, mention the bracket numbers [1], [2], … in passing where helpful."
     )
-    return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
-    ]
+    out: list[dict[str, str]] = [{"role": "system", "content": system}]
+    if conversation_history:
+        for m in conversation_history:
+            role = m.get("role", "")
+            if role not in ("user", "assistant"):
+                continue
+            content = (m.get("content") or "").strip()
+            if not content:
+                continue
+            out.append({"role": role, "content": content})
+    out.append({"role": "user", "content": user})
+    return out
+
+
+def strip_citations_footer_from_answer(answer: str) -> str:
+    """去掉 ``format_citations_footer`` 追加的脚注，便于写入会话记忆。"""
+    marker = "\n---\nCitations:"
+    if marker in answer:
+        return answer.split(marker, 1)[0].rstrip()
+    return answer.rstrip()
 
 
 def format_citations_footer(citations: list) -> str:
@@ -94,3 +137,32 @@ def format_citations_footer(citations: list) -> str:
             f"  [{i}] chunk_id={c.chunk_id} version_id={c.version_id} | {loc}"
         )
     return "\n".join(lines)
+
+
+_BRACKET_INDEX = re.compile(r"\[(\d+)\]")
+
+
+def body_references_evidence_index(body: str, n_citations: int) -> bool:
+    """
+    正文是否显式引用 EVIDENCE 编号 [1]…[n]（与 assemble 的条目序号对齐）。
+    用于避免「已检索但模型未用证据」时仍追加整段 Citations 脚注。
+    """
+    if n_citations <= 0 or not body:
+        return False
+    for m in _BRACKET_INDEX.finditer(body):
+        try:
+            i = int(m.group(1))
+        except ValueError:
+            continue
+        if 1 <= i <= n_citations:
+            return True
+    return False
+
+
+def maybe_format_citations_footer(citations: list, body: str) -> str:
+    """有检索结果且正文出现对应 [n] 引用时才附加脚注；否则返回空串（侧栏仍可有完整 citations）。"""
+    if not citations:
+        return ""
+    if not body_references_evidence_index(body, len(citations)):
+        return ""
+    return format_citations_footer(citations)

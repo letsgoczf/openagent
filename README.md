@@ -4,7 +4,7 @@
 
 单用户 **智能体（Agent）** 应用：Kernel 编排、工具与 Skills 注册表、检索与可溯源证据；文档侧的向量/关键词检索是 Agent 的 grounded 能力之一，而非单独的「RAG 产品」形态。
 
-更完整的架构与事件约定见根目录 [`OPENAGENT_ARCHITECTURE.md`](./OPENAGENT_ARCHITECTURE.md)；开发里程碑见 [`docs/DEVELOPMENT_PLAN.md`](./docs/DEVELOPMENT_PLAN.md)。
+更完整的架构与事件约定见根目录 [`OPENAGENT_ARCHITECTURE.md`](./OPENAGENT_ARCHITECTURE.md)；开发里程碑见 [`docs/DEVELOPMENT_PLAN.md`](./docs/DEVELOPMENT_PLAN.md)。**配置文件写法、环境变量、Tools / Skills / 提示词模板约定**见 **[`docs/CONFIGURATION.md`](./docs/CONFIGURATION.md)**（英文：[`docs/CONFIGURATION.en.md`](./docs/CONFIGURATION.en.md)）。
 
 ## 架构图
 
@@ -16,7 +16,7 @@
 |------|------|
 | 后端 | Python 3.11+、FastAPI、Uvicorn、SQLite、Qdrant、可选 Ollama / OpenAI 兼容接口 |
 | 前端 | Next.js 15、React 18、TypeScript、WebSocket 流式对话 |
-| 配置 | `config/openagent.yaml`（可用环境变量 `OPENAGENT_CONFIG` 指向其他文件） |
+| 配置 | `config/openagent.yaml`（可用 `OPENAGENT_CONFIG`）；[`docs/CONFIGURATION.md`](./docs/CONFIGURATION.md) / [`docs/CONFIGURATION.en.md`](./docs/CONFIGURATION.en.md) |
 
 ## 环境要求
 
@@ -38,7 +38,7 @@ pip install -e ".[dev]"
 
 ### 2. 配置
 
-复制或编辑 [`config/openagent.yaml`](./config/openagent.yaml)：`models.generation`、`models.embedding`、`storage`（SQLite 路径、Qdrant 连接）等。
+复制或编辑 [`config/openagent.yaml`](./config/openagent.yaml)：`models.generation`、`models.embedding`、`storage`（SQLite 路径、Qdrant 连接）等。完整字段说明、**`OPENAGENT_*` 环境变量规则**、**磁盘 Agent Skills（`skills/`）** 与 **工具别名** 等见 **[`docs/CONFIGURATION.md`](./docs/CONFIGURATION.md)**（英文 **[`docs/CONFIGURATION.en.md`](./docs/CONFIGURATION.en.md)**）。
 
 嵌套项可用环境变量覆盖，例如：
 
@@ -104,6 +104,8 @@ openagent/
   README.en.md
   OPENAGENT_ARCHITECTURE.md
   config/openagent.yaml
+  docs/CONFIGURATION.md      # 配置与 Skills / 工具约定（中文）
+  docs/CONFIGURATION.en.md   # Configuration guide (English)
   backend/           # FastAPI、Kernel、RAG、Registry、存储
   frontend/          # Next.js 应用
   scripts/start_server.py

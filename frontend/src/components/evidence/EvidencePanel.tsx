@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
+import { useScrollbarReveal } from "@/hooks/useScrollbarReveal";
 import type {
   CitationDTO,
   EvidenceEntryDTO,
@@ -24,6 +25,8 @@ export function EvidencePanel(props: {
   citations: CitationDTO[];
   activeChunkId: string | null;
   onSelectCitation: (chunkId: string) => void;
+  variant?: "inline" | "floating";
+  className?: string;
 }) {
   const {
     traceLines,
@@ -34,7 +37,12 @@ export function EvidencePanel(props: {
     citations,
     activeChunkId,
     onSelectCitation,
+    variant = "inline",
+    className,
   } = props;
+
+  const panelRef = useRef<HTMLElement>(null);
+  useScrollbarReveal(panelRef, styles.panelScrollbarReveal);
 
   useEffect(() => {
     if (!activeChunkId) return;
@@ -42,8 +50,20 @@ export function EvidencePanel(props: {
     el?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [activeChunkId]);
 
+  const panelClass = [
+    styles.panel,
+    variant === "floating" ? styles.panelFloating : null,
+    className,
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
-    <aside className={styles.panel} aria-label="检索、子智能体与工具追踪">
+    <aside
+      ref={panelRef}
+      className={panelClass}
+      aria-label="检索、子智能体与工具追踪"
+    >
       <h2 className={styles.title}>Evidence &amp; citations</h2>
 
       {citations.length > 0 ? (
@@ -72,6 +92,10 @@ export function EvidencePanel(props: {
       {evidenceEntries.length > 0 ? (
         <section className={styles.block}>
           <h3 className={styles.sub}>Evidence chunks</h3>
+          <p className={styles.hintSmall}>
+            下列为<strong>本轮 RAG 检索返回的全部片段</strong>（top-K）。正文中可点击的 <span className={styles.mono}>[n]</span>{" "}
+            会定位到对应 chunk。
+          </p>
           <ul className={styles.evidenceList}>
             {evidenceEntries.map((e) => (
               <li

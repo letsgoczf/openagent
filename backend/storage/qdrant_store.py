@@ -126,6 +126,58 @@ class QdrantStore:
             )
         return out
 
+    def upsert_memory_fragment(
+        self,
+        vector: list[float],
+        *,
+        fragment_id: str,
+        session_id: str,
+    ) -> None:
+        """Phase C：记忆片段向量（payload 仅含 session / id，全文在 SQLite）。"""
+        self.ensure_collection()
+        pid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"openagent:memfrag:{fragment_id}"))
+        self._client.upsert(
+            collection_name=self.collection_name,
+            points=[
+                PointStruct(
+                    id=pid,
+                    vector=vector,
+                    payload={"fragment_id": fragment_id, "session_id": session_id},
+                )
+            ],
+        )
+
+    def search_memory_fragments(
+        self,
+        query_vector: list[float],
+        *,
+        session_id: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if limit <= 0:
+            return []
+        self.ensure_collection()
+        flt = Filter(
+            must=[FieldCondition(key="session_id", match=MatchValue(value=session_id))]
+        )
+        res = self._client.query_points(
+            collection_name=self.collection_name,
+            query=query_vector,
+            limit=limit,
+            query_filter=flt,
+            with_payload=True,
+        )
+        out: list[dict[str, Any]] = []
+        for p in res.points:
+            pl = p.payload or {}
+            out.append(
+                {
+                    "fragment_id": pl.get("fragment_id"),
+                    "score": p.score,
+                }
+            )
+        return out
+
     def delete_by_version_ids(self, version_ids: list[str]) -> None:
         if not version_ids:
             return
