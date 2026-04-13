@@ -14,6 +14,7 @@ class VLLMAdapter(OpenAIAdapter):
         *,
         base_url: str | None = None,
         api_key_env: str | None = None,
+        default_temperature: float | None = None,
     ) -> None:
         if not base_url:
             msg = "vLLM requires models.generation.base_url (OpenAPI v1 base)."
@@ -21,4 +22,9 @@ class VLLMAdapter(OpenAIAdapter):
         key: str | None = None
         if api_key_env:
             key = os.environ.get(api_key_env) or None
-        super().__init__(model_id, api_key=key, base_url=base_url)
+        super().__init__(
+            model_id,
+            api_key=key,
+            base_url=base_url,
+            default_temperature=default_temperature,
+        )

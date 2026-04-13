@@ -32,7 +32,7 @@ def main() -> None:
     parser.add_argument(
         "--stream",
         action="store_true",
-        help="流式输出 thinking（若模型支持）与正文；Citations 在文末",
+        help="流式输出 thinking（若模型支持）与正文；引用以正文内 [n] 标出",
     )
     args = parser.parse_args()
 

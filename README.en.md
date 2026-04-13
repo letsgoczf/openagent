@@ -4,7 +4,11 @@
 
 Single-user **agent** application: Kernel orchestration, tools and Skills registry, retrieval with verifiable evidence. Document vector/keyword search is a **grounded capability** of the agent, not a standalone “RAG-only” product.
 
-For full architecture and event contracts, see [`OPENAGENT_ARCHITECTURE.md`](./OPENAGENT_ARCHITECTURE.md). For milestones, see [`docs/DEVELOPMENT_PLAN.md`](./docs/DEVELOPMENT_PLAN.md).
+For full architecture and event contracts, see [`OPENAGENT_ARCHITECTURE.md`](./OPENAGENT_ARCHITECTURE.md). For milestones, see [`docs/DEVELOPMENT_PLAN.md`](./docs/DEVELOPMENT_PLAN.md). **Configuration:** **[`docs/CONFIGURATION.en.md`](./docs/CONFIGURATION.en.md)** (English) · [`docs/CONFIGURATION.md`](./docs/CONFIGURATION.md) (简体中文)
+
+## Architecture diagram
+
+![OpenAgent architecture diagram](./docs/openagent-architecture-figma.png)
 
 ## Stack
 
@@ -12,7 +16,7 @@ For full architecture and event contracts, see [`OPENAGENT_ARCHITECTURE.md`](./O
 |--------|--------|
 | Backend | Python 3.11+, FastAPI, Uvicorn, SQLite, Qdrant, optional Ollama / OpenAI-compatible APIs |
 | Frontend | Next.js 15, React 18, TypeScript, WebSocket streaming chat |
-| Config | `config/openagent.yaml` (override path with env `OPENAGENT_CONFIG`) |
+| Config | `config/openagent.yaml` (override with `OPENAGENT_CONFIG`); guide: [`docs/CONFIGURATION.en.md`](./docs/CONFIGURATION.en.md) |
 
 ## Requirements
 
@@ -34,7 +38,7 @@ pip install -e ".[dev]"
 
 ### 2. Configure
 
-Edit [`config/openagent.yaml`](./config/openagent.yaml): `models.generation`, `models.embedding`, `storage` (SQLite path, Qdrant), etc.
+Edit [`config/openagent.yaml`](./config/openagent.yaml): `models.generation`, `models.embedding`, `storage` (SQLite path, Qdrant), etc. For **`OPENAGENT_*` env rules**, **`skills/`** packages, and **tool name aliases**, see [`docs/CONFIGURATION.en.md`](./docs/CONFIGURATION.en.md).
 
 Override nested values with environment variables, e.g.:
 
@@ -100,6 +104,8 @@ openagent/
   README.en.md
   OPENAGENT_ARCHITECTURE.md
   config/openagent.yaml
+  docs/CONFIGURATION.en.md   # configuration guide (English)
+  docs/CONFIGURATION.md      # 配置说明（简体中文）
   backend/           # FastAPI, Kernel, retrieval, registry, storage
   frontend/          # Next.js app
   scripts/start_server.py

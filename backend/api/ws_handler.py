@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
+import threading
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -57,6 +57,12 @@ async def ws_endpoint(ws: WebSocket) -> None:
         client_request_id = str(data.get("client_request_id") or "req_unknown")
         query = str(data.get("query") or "")
         stream = bool(data.get("stream", True))
+        raw_sid = data.get("session_id")
+        session_id = (
+            str(raw_sid).strip()
+            if raw_sid is not None and str(raw_sid).strip()
+            else None
+        )
         if not query:
             await ws.send_json(
                 {
@@ -95,6 +101,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 "mode_selected": "chat.mode_selected",
                 "retrieval_update": "chat.retrieval_update",
                 "evidence_update": "chat.evidence_update",
+                "citation_context": "chat.citation_context",
                 "tool_call_started": "chat.tool_call_started",
                 "tool_call_finished": "chat.tool_call_finished",
                 "tool_call_failed": "chat.tool_call_failed",
@@ -152,6 +159,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     }
                 )
 
+        cancel_ev = threading.Event()
+        budget = Budget(cancel_event=cancel_ev)
+
         async def sender() -> None:
             while True:
                 item = await q.get()
@@ -159,18 +169,13 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 if item.get("_done"):
                     return
 
-        sender_task = asyncio.create_task(sender())
-
-        # 用线程跑同步 KernelEngine，避免阻塞事件循环
         async def run_kernel() -> None:
             nonlocal delta_stream_state
             try:
-                budget = Budget()
-                # KernelEngine 返回的 run_id 在 result 中；我们用它回填 delta 的 run_id
-                # （trace_sink 会率先推 evidence 事件并带 run_id）
                 result = await asyncio.to_thread(
                     KernelEngine().run_chat,
                     query,
+                    session_id=session_id,
                     budget=budget,
                     stream=stream,
                     stream_writer=stream_writer if stream else None,
@@ -178,30 +183,68 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 )
                 delta_stream_state["run_id"] = result.run_id
 
-                enqueue(
-                    {
-                        "type": "chat.completed",
-                        "run_id": result.run_id,
-                        "answer": _normalize_answer_text(getattr(result, "answer", "")),
-                        "degraded": result.degraded,
-                        "degrade_reason": result.degrade_reason,
-                        "citations": [c.model_dump() for c in result.citations],
-                        "evidence_entries": [
-                            e.model_dump() for e in result.evidence_entries
-                        ],
-                        "retrieval_state": result.retrieval_state,
-                        "_done": True,
-                    }
-                )
+                thinking = getattr(result, "thinking", None)
+                payload_cm: dict[str, Any] = {
+                    "type": "chat.completed",
+                    "run_id": result.run_id,
+                    "answer": _normalize_answer_text(getattr(result, "answer", "")),
+                    "degraded": result.degraded,
+                    "degrade_reason": result.degrade_reason,
+                    "citations": [c.model_dump() for c in result.citations],
+                    "evidence_entries": [
+                        e.model_dump() for e in result.evidence_entries
+                    ],
+                    "retrieval_state": result.retrieval_state,
+                    "_done": True,
+                }
+                if thinking:
+                    payload_cm["thinking"] = thinking
+                enqueue(payload_cm)
             except Exception as e:  # noqa: BLE001
                 enqueue(
                     {
                         "type": "chat.failed",
+                        "client_request_id": client_request_id,
                         "error": {"message": str(e)},
                         "_done": True,
                     }
                 )
 
-        await run_kernel()
+        async def listen_stop() -> None:
+            try:
+                while True:
+                    raw = await ws.receive_text()
+                    try:
+                        pkt = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    if pkt.get("type") != "chat.stop":
+                        continue
+                    if str(pkt.get("client_request_id") or "") != client_request_id:
+                        continue
+                    cancel_ev.set()
+                    return
+            except WebSocketDisconnect:
+                cancel_ev.set()
+
+        sender_task = asyncio.create_task(sender())
+        kernel_task = asyncio.create_task(run_kernel())
+        listen_task = asyncio.create_task(listen_stop())
+
+        await asyncio.wait(
+            {kernel_task, listen_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        if listen_task.done() and not kernel_task.done():
+            await kernel_task
+
+        if not listen_task.done():
+            listen_task.cancel()
+            try:
+                await listen_task
+            except asyncio.CancelledError:
+                pass
+
         await sender_task
 

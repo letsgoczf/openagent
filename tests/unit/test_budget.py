@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 
 from backend.kernel.budget import Budget
@@ -32,3 +33,11 @@ def test_token_budget() -> None:
     assert not b.token_budget_exceeded()
     b.consume_tokens(10)
     assert b.token_budget_exceeded()
+
+
+def test_budget_cancel_event() -> None:
+    ev = threading.Event()
+    b = Budget(cancel_event=ev)
+    assert not b.is_cancelled()
+    ev.set()
+    assert b.is_cancelled()

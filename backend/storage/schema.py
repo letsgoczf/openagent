@@ -77,6 +77,49 @@ CREATE TABLE IF NOT EXISTS trace_event (
 
 CREATE INDEX IF NOT EXISTS idx_trace_event_run ON trace_event(run_id, sequence_num);
 CREATE INDEX IF NOT EXISTS idx_chunk_version ON chunk(version_id);
+
+CREATE TABLE IF NOT EXISTS chat_session_turn (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    run_id TEXT,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    token_estimate INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_session_turn_session_id ON chat_session_turn(session_id, id);
+
+CREATE TABLE IF NOT EXISTS chat_session_summary (
+    session_id TEXT PRIMARY KEY,
+    summary_text TEXT NOT NULL,
+    covers_until_id INTEGER NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS memory_fragment (
+    fragment_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    run_id TEXT,
+    fragment_type TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_fragment_session_id ON memory_fragment(session_id);
+
+-- 前端聊天 UI 会话（与 chat_session_turn 记忆表独立；按 session_id 与 WS 对齐）
+CREATE TABLE IF NOT EXISTS ui_chat_session (
+    session_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    payload_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ui_preferences (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 

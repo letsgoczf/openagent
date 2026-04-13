@@ -80,8 +80,8 @@
   padding: 0.45rem 1rem;
   border: none;
   border-radius: var(--oa-radius);
-  background: linear-gradient(135deg, #3dffce, #2bc4ff);
-  color: #061018;
+  background: linear-gradient(135deg, var(--oa-neon), var(--oa-accent-blue));
+  color: #071218;
   font-weight: 600;
   cursor: pointer;
 }

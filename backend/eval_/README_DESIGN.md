@@ -14,6 +14,7 @@
 - `EvalReport`：
   - 总体指标与分层指标（L0~L3 pass rate）
   - 失败用例列表（case_id、失败阶段、失败原因、trace 指针）
+- 记忆子系统 trace 聚合（可选）：`backend/memory/eval_report.summarize_memory_trace_events`，从 `trace_event` 解析 `(event_type, payload)` 列表即可并入报表附录。
 
 ### 3. L0~L3 指标（必须实现）
 - L0：程序判定

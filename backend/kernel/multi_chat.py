@@ -47,12 +47,20 @@ def run_sequential_two_agent(
     stream: bool,
     stream_writer: Callable[[str, str], None] | None,
     prompt_addons: list[str] | None,
+    worker_template_blocks: list[str] | None = None,
+    synthesizer_template_blocks: list[str] | None = None,
+    conversation_history: list[dict[str, str]] | None = None,
+    rolling_summary: str | None = None,
+    reconstructed_memory: str | None = None,
 ) -> ChatRunResult:
     """
     Sub-agent 1（analyst）：与用户问题相同，走完整 retrieve → generate（流式可关闭）。
     Sub-agent 2（synthesizer）：在 analyst 草稿上整合为最终答复（默认开启流式）。
     """
-    addons = prompt_addons or []
+    base_addons = list(prompt_addons or [])
+    worker_blocks = list(worker_template_blocks or [])
+    synth_tpl = list(synthesizer_template_blocks or [])
+    phase1_addons = [*base_addons, *worker_blocks]
 
     def _muted(_kind: str, _text: str) -> None:
         return
@@ -83,7 +91,10 @@ def run_sequential_two_agent(
             version_scope=version_scope,
             stream=stream,
             stream_writer=_muted if stream else None,
-            prompt_addons=addons,
+            prompt_addons=phase1_addons,
+            conversation_history=conversation_history,
+            rolling_summary=rolling_summary,
+            reconstructed_memory=reconstructed_memory,
         )
     except Exception as e:  # noqa: BLE001
         trace.emit(
@@ -114,7 +125,7 @@ def run_sequential_two_agent(
         "2) 若草稿已有引用编号，尽量保留其语义对应；\n"
         "3) 不要把本段系统说明原样复述给用户。"
     )
-    phase2_addons = [*addons, synth_addon]
+    phase2_addons = [*base_addons, *synth_tpl, synth_addon]
 
     trace.emit(
         "agent_spawned",
@@ -142,6 +153,9 @@ def run_sequential_two_agent(
             stream=stream,
             stream_writer=stream_writer if stream else None,
             prompt_addons=phase2_addons,
+            conversation_history=conversation_history,
+            rolling_summary=rolling_summary,
+            reconstructed_memory=reconstructed_memory,
         )
     except Exception as e:  # noqa: BLE001
         trace.emit(
@@ -164,6 +178,7 @@ def run_sequential_two_agent(
                 "synthesizer_error": str(e),
             },
             degrade_reason=f"synthesizer_failed:{e}",
+            thinking=r1.thinking,
         )
 
     trace.emit(
@@ -199,4 +214,5 @@ def run_sequential_two_agent(
             "synthesizer": r2.retrieval_state,
         },
         degrade_reason=dr,
+        thinking=r2.thinking,
     )

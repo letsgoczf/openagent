@@ -7,13 +7,20 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+import re
+from pathlib import Path
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from backend.config_loader import OpenAgentSettings, resolve_repo_relative_path
 from backend.registry.tool_gateway import ToolGateway
 from backend.registry.tool_registry import ToolRegistry
+
+_SKILL_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_READ_SKILL_MAX_BYTES = 512_000
+_READ_SKILL_MAX_CHARS = 120_000
 
 
 def web_search(query: str) -> dict[str, Any]:
@@ -91,11 +98,88 @@ def web_search(query: str) -> dict[str, Any]:
     }
 
 
-def register_builtin_handlers(gateway: ToolGateway, registry: ToolRegistry) -> None:
+def read_skill_reference_file(
+    skill_id: str,
+    relative_path: str,
+    *,
+    skills_root: Path,
+) -> dict[str, Any]:
+    """
+    只读 ``skills_root/<skill_id>/`` 下 ``references/`` 或 ``assets/`` 内的文本文件（防路径穿越）。
+    供 Agent Skills 包内渐进式披露 L3 使用。
+    """
+    sid = (skill_id or "").strip()
+    if not sid or _SKILL_ID_RE.fullmatch(sid) is None:
+        return {"ok": False, "error": "invalid_skill_id"}
+
+    rel = (relative_path or "").strip().replace("\\", "/")
+    parts = [p for p in rel.split("/") if p]
+    if not rel or rel.startswith("/") or any(p == ".." for p in parts):
+        return {"ok": False, "error": "invalid_relative_path"}
+
+    rel_lower = rel.lower()
+    if not (rel_lower.startswith("references/") or rel_lower.startswith("assets/")):
+        return {"ok": False, "error": "path_must_start_with_references_or_assets"}
+
+    base = (skills_root / sid).resolve()
+    if not base.is_dir():
+        return {"ok": False, "error": "skill_directory_not_found"}
+
+    target = (base / rel).resolve()
+    try:
+        target.relative_to(base)
+    except ValueError:
+        return {"ok": False, "error": "path_escape"}
+
+    if not target.is_file():
+        return {"ok": False, "error": "not_a_file"}
+
+    try:
+        nbytes = target.stat().st_size
+    except OSError as e:
+        return {"ok": False, "error": "stat_failed", "detail": str(e)}
+    if nbytes > _READ_SKILL_MAX_BYTES:
+        return {
+            "ok": False,
+            "error": "file_too_large",
+            "max_bytes": _READ_SKILL_MAX_BYTES,
+        }
+
+    try:
+        raw = target.read_bytes()
+    except OSError as e:
+        return {"ok": False, "error": "read_failed", "detail": str(e)}
+
+    text = raw.decode("utf-8", errors="replace")
+    if len(text) > _READ_SKILL_MAX_CHARS:
+        text = text[:_READ_SKILL_MAX_CHARS] + "\n…(truncated)"
+
+    return {
+        "ok": True,
+        "skill_id": sid,
+        "relative_path": rel,
+        "chars": len(text),
+        "content": text,
+    }
+
+
+def register_builtin_handlers(
+    gateway: ToolGateway,
+    registry: ToolRegistry,
+    settings: OpenAgentSettings | None = None,
+) -> None:
     """为配置中已启用的已知内置工具绑定 handler。"""
-    mapping = {
+    mapping: dict[str, Callable[..., Any]] = {
         "web_search": web_search,
     }
+    if settings is not None:
+        root = resolve_repo_relative_path(str(settings.skills_bundle.skills_dir))
+
+        def read_skill_reference(skill_id: str, relative_path: str) -> dict[str, Any]:
+            return read_skill_reference_file(skill_id, relative_path, skills_root=root)
+
+        mapping["read_skill_reference"] = read_skill_reference
+
     for name, fn in mapping.items():
         t = registry.get(name)
         if t is not None and t.enabled:

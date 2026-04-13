@@ -1,0 +1,22 @@
+.textSeg {
+  white-space: inherit;
+}
+
+.citeInline {
+  display: inline;
+  margin: 0 0.06em;
+  padding: 0 0.28em;
+  border: 1px solid color-mix(in srgb, var(--oa-neon) 42%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--oa-neon) 11%, transparent);
+  color: var(--oa-neon);
+  cursor: pointer;
+  font: inherit;
+  line-height: inherit;
+  vertical-align: baseline;
+}
+
+.citeInline:hover {
+  border-color: var(--oa-neon);
+  background: color-mix(in srgb, var(--oa-neon) 18%, transparent);
+}

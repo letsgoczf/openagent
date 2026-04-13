@@ -372,3 +372,188 @@ class SQLiteStore:
             "payload": payload,
             "created_at": row["created_at"],
         }
+
+    def append_chat_session_turn(
+        self,
+        session_id: str,
+        run_id: str | None,
+        role: str,
+        content: str,
+        token_estimate: int | None = None,
+    ) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO chat_session_turn (session_id, run_id, role, content, token_estimate)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (session_id, run_id, role, content, token_estimate),
+        )
+        self._conn.commit()
+
+    def fetch_chat_session_turns_recent(self, session_id: str, limit: int) -> list[dict[str, Any]]:
+        if limit <= 0:
+            return []
+        cur = self._conn.execute(
+            """
+            SELECT id, session_id, run_id, role, content, token_estimate, created_at
+            FROM chat_session_turn
+            WHERE session_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (session_id, limit),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        rows.reverse()
+        return rows
+
+    def fetch_chat_session_turns_after(
+        self, session_id: str, after_id: int
+    ) -> list[dict[str, Any]]:
+        """按 id 升序返回 ``id > after_id`` 的会话行（Phase B 摘要后的 verbatim 窗口）。"""
+        cur = self._conn.execute(
+            """
+            SELECT id, session_id, run_id, role, content, token_estimate, created_at
+            FROM chat_session_turn
+            WHERE session_id = ? AND id > ?
+            ORDER BY id ASC
+            """,
+            (session_id, after_id),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def count_chat_session_turns(self, session_id: str) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS c FROM chat_session_turn WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return int(row["c"]) if row else 0
+
+    def get_chat_session_summary(self, session_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            """
+            SELECT session_id, summary_text, covers_until_id, updated_at
+            FROM chat_session_summary
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def insert_memory_fragment(
+        self,
+        fragment_id: str,
+        session_id: str,
+        run_id: str | None,
+        fragment_type: str,
+        text: str,
+    ) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO memory_fragment (fragment_id, session_id, run_id, fragment_type, text)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (fragment_id, session_id, run_id, fragment_type, text),
+        )
+        self._conn.commit()
+
+    def get_memory_fragment(self, fragment_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM memory_fragment WHERE fragment_id = ?",
+            (fragment_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def upsert_chat_session_summary(
+        self,
+        session_id: str,
+        summary_text: str,
+        covers_until_id: int,
+    ) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO chat_session_summary (session_id, summary_text, covers_until_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                summary_text = excluded.summary_text,
+                covers_until_id = excluded.covers_until_id,
+                updated_at = datetime('now')
+            """,
+            (session_id, summary_text, covers_until_id),
+        )
+        self._conn.commit()
+
+    # --- 前端 Chat UI 会话（整会话 JSON 快照，与 localStorage 结构对齐）---
+
+    def get_ui_chat_state(self) -> tuple[str | None, list[dict[str, Any]]]:
+        """返回 (active_session_id 或 None, sessions 列表，结构与前端 ChatSessionPersisted 一致)。"""
+        row = self._conn.execute(
+            "SELECT value FROM ui_preferences WHERE key = ?",
+            ("active_chat_session_id",),
+        ).fetchone()
+        active_raw = (row["value"] if row else "") or ""
+        active = active_raw.strip() or None
+        cur = self._conn.execute(
+            """
+            SELECT session_id, title, updated_at_ms, payload_json
+            FROM ui_chat_session
+            ORDER BY updated_at_ms DESC
+            """
+        )
+        sessions: list[dict[str, Any]] = []
+        for r in cur.fetchall():
+            try:
+                payload = json.loads(r["payload_json"] or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            sessions.append(
+                {
+                    "id": r["session_id"],
+                    "title": r["title"] or "新会话",
+                    "updatedAt": int(r["updated_at_ms"] or 0),
+                    "messages": payload.get("messages") or [],
+                    "lastEvidenceEntries": payload.get("lastEvidenceEntries") or [],
+                    "lastCitations": payload.get("lastCitations") or [],
+                }
+            )
+        return active, sessions
+
+    def put_ui_chat_state(
+        self,
+        *,
+        active_session_id: str | None,
+        sessions: list[dict[str, Any]],
+    ) -> None:
+        """全量替换 UI 会话表（单用户；事务）。"""
+        self._conn.execute("BEGIN")
+        try:
+            self._conn.execute("DELETE FROM ui_chat_session")
+            for s in sessions:
+                sid = str(s.get("id") or "").strip()
+                if not sid:
+                    continue
+                title = str(s.get("title") or "新会话")
+                updated = int(s.get("updatedAt") or 0)
+                payload = {
+                    "messages": s.get("messages") or [],
+                    "lastEvidenceEntries": s.get("lastEvidenceEntries") or [],
+                    "lastCitations": s.get("lastCitations") or [],
+                }
+                self._conn.execute(
+                    """
+                    INSERT INTO ui_chat_session (session_id, title, updated_at_ms, payload_json)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (sid, title, updated, json.dumps(payload, ensure_ascii=False)),
+                )
+            self._conn.execute(
+                """
+                INSERT INTO ui_preferences (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                ("active_chat_session_id", active_session_id or ""),
+            )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise

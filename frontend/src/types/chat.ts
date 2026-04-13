@@ -31,3 +31,12 @@ export interface EvidenceEntryDTO {
   keyword_score?: number | null;
   rerank_score?: number | null;
 }
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  thinking?: string;
+  citations?: CitationDTO[];
+  evidenceEntries?: EvidenceEntryDTO[];
+}
