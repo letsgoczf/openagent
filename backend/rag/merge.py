@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from backend.storage.sqlite_store import SQLiteStore
 
 
+RETRIEVABLE_VERSION_STATUSES = ("completed", "ready")
+
+
 @dataclass
 class MergedCandidate:
     chunk_id: str
@@ -85,7 +88,10 @@ def merge_and_dedup(
     if not chunk_ids:
         return []
 
-    rows = sqlite.get_chunks_by_ids(list(chunk_ids))
+    rows = sqlite.get_chunks_by_ids(
+        list(chunk_ids),
+        version_statuses=RETRIEVABLE_VERSION_STATUSES,
+    )
 
     candidates: list[MergedCandidate] = []
     for cid in sorted(chunk_ids):

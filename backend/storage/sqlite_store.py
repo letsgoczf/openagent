@@ -151,14 +151,34 @@ class SQLiteStore:
         cur = self._conn.execute(sql, (query, *extra_args, limit))
         return [{"chunk_id": r["chunk_id"], "score": r["score"]} for r in cur.fetchall()]
 
-    def get_chunks_by_ids(self, chunk_ids: list[str]) -> dict[str, dict[str, Any]]:
+    def get_chunks_by_ids(
+        self,
+        chunk_ids: list[str],
+        *,
+        version_statuses: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, dict[str, Any]]:
         """Return chunk_id -> row dicts (with ``source_span`` parsed)."""
         if not chunk_ids:
             return {}
-        placeholders = ",".join("?" * len(chunk_ids))
+        chunk_placeholders = ",".join("?" * len(chunk_ids))
+        args: list[Any] = list(chunk_ids)
+        status_join = ""
+        status_filter = ""
+        if version_statuses is not None:
+            if not version_statuses:
+                return {}
+            status_placeholders = ",".join("?" * len(version_statuses))
+            status_join = "JOIN document_version v ON v.version_id = c.version_id"
+            status_filter = f" AND v.status IN ({status_placeholders})"
+            args.extend(version_statuses)
         rows = self._conn.execute(
-            f"SELECT * FROM chunk WHERE chunk_id IN ({placeholders})",
-            chunk_ids,
+            f"""
+            SELECT c.*
+            FROM chunk c
+            {status_join}
+            WHERE c.chunk_id IN ({chunk_placeholders}){status_filter}
+            """,
+            args,
         ).fetchall()
         out: dict[str, dict[str, Any]] = {}
         for row in rows:

@@ -68,6 +68,43 @@ def test_merge_dedup_single_chunk() -> None:
     assert merged[0].chunk_id == cid
 
 
+def test_merge_excludes_non_retrievable_versions() -> None:
+    store = SQLiteStore(":memory:")
+    good_doc, good_ver, good_cid = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+    failed_doc, failed_ver, failed_cid = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+    processing_doc, processing_ver, processing_cid = (
+        str(uuid.uuid4()),
+        str(uuid.uuid4()),
+        str(uuid.uuid4()),
+    )
+    store.insert_document(good_doc, "/ok", "ok.pdf", "pdf")
+    store.insert_document_version(good_ver, good_doc, "h1", "ev1", "tok", "completed")
+    store.insert_chunk(good_cid, good_ver, "text", 0, "safe answer", {"page_number": 1})
+    store.insert_document(failed_doc, "/bad", "bad.pdf", "pdf")
+    store.insert_document_version(failed_ver, failed_doc, "h2", "ev1", "tok", "failed")
+    store.insert_chunk(failed_cid, failed_ver, "text", 0, "partial answer", {"page_number": 1})
+    store.insert_document(processing_doc, "/partial", "partial.pdf", "pdf")
+    store.insert_document_version(
+        processing_ver, processing_doc, "h3", "ev1", "tok", "processing"
+    )
+    store.insert_chunk(
+        processing_cid, processing_ver, "text", 0, "unfinished answer", {"page_number": 1}
+    )
+
+    dense = [
+        {"chunk_id": failed_cid, "version_id": failed_ver, "dense_score": 0.99},
+        {"chunk_id": processing_cid, "version_id": processing_ver, "dense_score": 0.98},
+        {"chunk_id": good_cid, "version_id": good_ver, "dense_score": 0.1},
+    ]
+    kw = [
+        {"chunk_id": failed_cid, "score": -10.0},
+        {"chunk_id": processing_cid, "score": -9.0},
+        {"chunk_id": good_cid, "score": -1.0},
+    ]
+    merged = merge_and_dedup(dense, kw, store, max_candidates=10)
+    assert [m.chunk_id for m in merged] == [good_cid]
+
+
 def test_merge_stable_order() -> None:
     store = SQLiteStore(":memory:")
     doc_id, ver_id = str(uuid.uuid4()), str(uuid.uuid4())
