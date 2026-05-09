@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -31,6 +32,9 @@ from backend.registry.service import RegistryService
 from backend.runners.chat_runner import ChatRunResult, build_chat_runner
 from backend.runners.composer import strip_citations_footer_from_answer
 from backend.storage.qdrant_store import QdrantStore
+
+
+logger = logging.getLogger(__name__)
 
 
 class KernelEngine:
@@ -247,46 +251,63 @@ class KernelEngine:
                 )
             if self.settings.memory.enabled:
                 body = strip_citations_footer_from_answer(result.answer)
-                trace.emit(
-                    "memory_write",
-                    {
-                        "session_id": sid,
-                        "user_chars": len(effective_query),
-                        "assistant_chars": len(body),
-                    },
-                )
-                persist_user_assistant_turns(
-                    sqlite,
-                    self.settings.memory,
-                    sid,
-                    result.run_id,
-                    effective_query,
-                    body,
-                    tok,
-                )
-                if self.settings.memory.consolidation_enabled:
-                    run_consolidation_if_needed(
-                        store=sqlite,
-                        cfg=self.settings.memory,
-                        session_id=sid,
-                        budget=bud,
-                        llm=runner.llm_adapter,
-                        tokenizer=tok,
-                        trace=trace,
+                try:
+                    trace.emit(
+                        "memory_write",
+                        {
+                            "session_id": sid,
+                            "user_chars": len(effective_query),
+                            "assistant_chars": len(body),
+                        },
                     )
-                if mem_qdrant is not None:
-                    persist_turn_fragments(
+                except Exception:
+                    logger.warning("failed to emit memory_write trace", exc_info=True)
+
+                turns_persisted = False
+                try:
+                    persist_user_assistant_turns(
                         sqlite,
-                        mem_qdrant,
-                        self.settings,
+                        self.settings.memory,
                         sid,
                         result.run_id,
                         effective_query,
                         body,
-                        trace,
-                        budget=bud,
-                        llm=runner.llm_adapter,
+                        tok,
                     )
+                    turns_persisted = True
+                except Exception:
+                    logger.warning("failed to persist chat memory", exc_info=True)
+
+                # Memory post-processing is best-effort; never fail a completed chat.
+                if turns_persisted and self.settings.memory.consolidation_enabled:
+                    try:
+                        run_consolidation_if_needed(
+                            store=sqlite,
+                            cfg=self.settings.memory,
+                            session_id=sid,
+                            budget=bud,
+                            llm=runner.llm_adapter,
+                            tokenizer=tok,
+                            trace=trace,
+                        )
+                    except Exception:
+                        logger.warning("failed to consolidate chat memory", exc_info=True)
+                if turns_persisted and mem_qdrant is not None:
+                    try:
+                        persist_turn_fragments(
+                            sqlite,
+                            mem_qdrant,
+                            self.settings,
+                            sid,
+                            result.run_id,
+                            effective_query,
+                            body,
+                            trace,
+                            budget=bud,
+                            llm=runner.llm_adapter,
+                        )
+                    except Exception:
+                        logger.warning("failed to persist memory fragments", exc_info=True)
         finally:
             qdrant.close()
             sqlite.close()

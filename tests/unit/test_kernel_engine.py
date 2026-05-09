@@ -6,6 +6,7 @@ from backend.config_loader import (
     EmbeddingConfig,
     EvidenceConfig,
     GenerationConfig,
+    MemoryConfig,
     ModelsConfig,
     OpenAgentSettings,
     RagConfig,
@@ -19,6 +20,8 @@ from backend.kernel.engine import KernelEngine
 from backend.rag.citation import Citation
 from backend.rag.evidence_builder import EvidenceEntry
 from backend.rag.service import RetrievalResult
+from backend.runners.chat_runner import ChatRunResult
+from backend.storage.sqlite_store import SQLiteStore
 
 
 def _settings_simple(tmp_path) -> OpenAgentSettings:
@@ -115,3 +118,45 @@ def test_engine_trace_events_sequence(
     assert "evidence_update" in types
     assert "completed" in types
     conn.close()
+
+
+def test_engine_returns_answer_when_memory_persist_fails(tmp_path) -> None:
+    settings = _settings_simple(tmp_path).model_copy(
+        update={
+            "memory": MemoryConfig(
+                enabled=True,
+                consolidation_enabled=False,
+                fragments_enabled=False,
+            )
+        }
+    )
+    sqlite = SQLiteStore(tmp_path / "engine-memory.db")
+    qdrant = MagicMock()
+    runner = MagicMock()
+    runner.llm_adapter = MagicMock()
+    runner.run.return_value = ChatRunResult(
+        answer="assistant reply",
+        citations=[],
+        evidence_entries=[],
+        degraded=False,
+        run_id="run_ok",
+        retrieval_state={},
+    )
+
+    with (
+        patch(
+            "backend.kernel.engine.build_chat_runner",
+            return_value=(runner, sqlite, qdrant),
+        ),
+        patch(
+            "backend.kernel.engine.persist_user_assistant_turns",
+            side_effect=RuntimeError("database is locked"),
+        ),
+    ):
+        out = KernelEngine(settings=settings).run_chat(
+            "hello world",
+            budget=Budget(max_llm_calls=1),
+        )
+
+    assert out.answer == "assistant reply"
+    qdrant.close.assert_called_once()
