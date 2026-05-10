@@ -70,7 +70,7 @@ async def put_chat_sessions_state(body: ChatSessionsStateDTO) -> dict[str, bool]
     sqlite = SQLiteStore(cfg.storage.sqlite_path)
     try:
         rows = [s.model_dump(mode="json") for s in body.sessions]
-        sqlite.put_ui_chat_state(active_session_id=active, sessions=rows)
-        return {"ok": True}
+        applied = sqlite.put_ui_chat_state(active_session_id=active, sessions=rows)
+        return {"ok": applied}
     finally:
         sqlite.close()

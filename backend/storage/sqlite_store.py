@@ -8,6 +8,9 @@ from typing import Any
 from backend.storage.schema import apply_schema
 
 
+RETRIEVABLE_VERSION_STATUSES = ("ready", "completed")
+
+
 class SQLiteStore:
     """SQLite persistence for documents, chunks (with FTS5), page_stats, trace_event."""
 
@@ -130,6 +133,8 @@ class SQLiteStore:
         """Keyword search over chunk_text; bm25 score (lower is better). Optional version / origin filter."""
         cond_version = ""
         cond_origin = ""
+        active_status_args = list(RETRIEVABLE_VERSION_STATUSES)
+        active_status_ph = ",".join("?" * len(active_status_args))
         extra_args: list[Any] = []
         if version_ids:
             placeholders = ",".join("?" * len(version_ids))
@@ -144,11 +149,13 @@ class SQLiteStore:
             SELECT c.chunk_id, bm25(chunk_fts) AS score
             FROM chunk_fts
             JOIN chunk c ON c.rowid = chunk_fts.rowid
-            WHERE chunk_fts MATCH ?{cond_version}{cond_origin}
+            JOIN document_version v ON v.version_id = c.version_id
+            WHERE chunk_fts MATCH ?
+              AND v.status IN ({active_status_ph}){cond_version}{cond_origin}
             ORDER BY score
             LIMIT ?
         """
-        cur = self._conn.execute(sql, (query, *extra_args, limit))
+        cur = self._conn.execute(sql, (query, *active_status_args, *extra_args, limit))
         return [{"chunk_id": r["chunk_id"], "score": r["score"]} for r in cur.fetchall()]
 
     def get_chunks_by_ids(self, chunk_ids: list[str]) -> dict[str, dict[str, Any]]:
@@ -156,9 +163,17 @@ class SQLiteStore:
         if not chunk_ids:
             return {}
         placeholders = ",".join("?" * len(chunk_ids))
+        active_status_args = list(RETRIEVABLE_VERSION_STATUSES)
+        active_status_ph = ",".join("?" * len(active_status_args))
         rows = self._conn.execute(
-            f"SELECT * FROM chunk WHERE chunk_id IN ({placeholders})",
-            chunk_ids,
+            f"""
+            SELECT c.*
+            FROM chunk c
+            JOIN document_version v ON v.version_id = c.version_id
+            WHERE c.chunk_id IN ({placeholders})
+              AND v.status IN ({active_status_ph})
+            """,
+            [*chunk_ids, *active_status_args],
         ).fetchall()
         out: dict[str, dict[str, Any]] = {}
         for row in rows:
@@ -523,10 +538,30 @@ class SQLiteStore:
         *,
         active_session_id: str | None,
         sessions: list[dict[str, Any]],
-    ) -> None:
-        """全量替换 UI 会话表（单用户；事务）。"""
-        self._conn.execute("BEGIN")
+    ) -> bool:
+        """全量替换 UI 会话表（单用户；事务）。
+
+        多个 PUT 可能因为防抖、网络或浏览器调度乱序抵达。若旧快照在新快照之后
+        落库，会把最近的 assistant 回复从持久化历史中抹掉；因此用客户端
+        ``updatedAt`` 的最大值作为快照高水位，拒绝明显陈旧的全量替换。
+        """
+        incoming_high_watermark = 0
+        for s in sessions:
+            incoming_high_watermark = max(
+                incoming_high_watermark,
+                int(s.get("updatedAt") or 0),
+            )
+
+        self._conn.execute("BEGIN IMMEDIATE")
         try:
+            row = self._conn.execute(
+                "SELECT MAX(updated_at_ms) AS max_updated FROM ui_chat_session"
+            ).fetchone()
+            current_high_watermark = int(row["max_updated"] or 0) if row else 0
+            if incoming_high_watermark < current_high_watermark:
+                self._conn.commit()
+                return False
+
             self._conn.execute("DELETE FROM ui_chat_session")
             for s in sessions:
                 sid = str(s.get("id") or "").strip()
@@ -554,6 +589,7 @@ class SQLiteStore:
                 ("active_chat_session_id", active_session_id or ""),
             )
             self._conn.commit()
+            return True
         except Exception:
             self._conn.rollback()
             raise

@@ -49,6 +49,35 @@ def test_sqlite_fts5_returns_chunk_id(sqlite_db: SQLiteStore) -> None:
     assert any(h["chunk_id"] == chunk_id for h in hits)
 
 
+def test_sqlite_search_excludes_non_retrievable_versions(sqlite_db: SQLiteStore) -> None:
+    ready_doc, _ready_ver, ready_chunk = _seed_doc(
+        sqlite_db, "visible alpha beta uniqueterm"
+    )
+    failed_doc = str(uuid.uuid4())
+    failed_ver = str(uuid.uuid4())
+    failed_chunk = str(uuid.uuid4())
+    sqlite_db.insert_document(failed_doc, "/tmp/bad.pdf", "bad.pdf", "pdf")
+    sqlite_db.insert_document_version(
+        failed_ver, failed_doc, "hash2", "ext-v1", "tiktoken:test", "failed"
+    )
+    sqlite_db.insert_chunk(
+        failed_chunk,
+        failed_ver,
+        "text",
+        0,
+        "hidden alpha beta uniqueterm",
+        {"page_number": 1},
+        page_number=1,
+    )
+
+    hits = sqlite_db.query_fts5("uniqueterm", limit=10)
+    assert {h["chunk_id"] for h in hits} == {ready_chunk}
+
+    rows = sqlite_db.get_chunks_by_ids([ready_chunk, failed_chunk])
+    assert set(rows) == {ready_chunk}
+    assert sqlite_db.get_document_summary(ready_doc) is not None
+
+
 def test_list_document_summaries(sqlite_db: SQLiteStore) -> None:
     _seed_doc(sqlite_db, "doc body")
     rows = sqlite_db.list_document_summaries()
@@ -163,3 +192,45 @@ def test_ui_chat_state_roundtrip(sqlite_db: SQLiteStore) -> None:
     assert rows[0]["title"] == "hi"
     assert rows[0]["updatedAt"] == 42
     assert rows[0]["messages"][0]["content"] == "x"
+
+
+def test_ui_chat_state_ignores_stale_full_snapshot(sqlite_db: SQLiteStore) -> None:
+    applied = sqlite_db.put_ui_chat_state(
+        active_session_id="s_1",
+        sessions=[
+            {
+                "id": "s_1",
+                "title": "Question",
+                "updatedAt": 200,
+                "messages": [
+                    {"id": "u1", "role": "user", "content": "question"},
+                    {"id": "a1", "role": "assistant", "content": "answer"},
+                ],
+                "lastEvidenceEntries": [],
+                "lastCitations": [],
+            }
+        ],
+    )
+    assert applied is True
+
+    stale_applied = sqlite_db.put_ui_chat_state(
+        active_session_id="s_1",
+        sessions=[
+            {
+                "id": "s_1",
+                "title": "Question",
+                "updatedAt": 100,
+                "messages": [
+                    {"id": "u1", "role": "user", "content": "question"},
+                ],
+                "lastEvidenceEntries": [],
+                "lastCitations": [],
+            }
+        ],
+    )
+
+    active, rows = sqlite_db.get_ui_chat_state()
+    assert stale_applied is False
+    assert active == "s_1"
+    assert len(rows) == 1
+    assert [m["role"] for m in rows[0]["messages"]] == ["user", "assistant"]
