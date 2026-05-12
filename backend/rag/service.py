@@ -17,6 +17,9 @@ from backend.storage.qdrant_store import QdrantStore
 from backend.storage.sqlite_store import SQLiteStore
 
 
+RETRIEVABLE_VERSION_STATUSES = ["ready", "completed"]
+
+
 @dataclass
 class RetrievalResult:
     """对齐 README_DESIGN：evidence + citations + retrieval_state；可选 candidate_debug。"""
@@ -85,6 +88,7 @@ class RetrievalService:
         allowed = self._settings.rag.allowed_origin_types
         origin_list = list(allowed) if allowed else None
         origin_frozen = frozenset(allowed) if allowed else None
+        version_statuses = list(RETRIEVABLE_VERSION_STATUSES)
 
         t0 = time.perf_counter()
         d_hits = dense_recall(
@@ -102,6 +106,7 @@ class RetrievalService:
                 top_k=tk_k,
                 version_ids=version_scope,
                 allowed_origin_types=origin_list,
+                version_statuses=version_statuses,
             )
         except Exception as e:  # noqa: BLE001
             # keyword 通道兜底：dense-only
@@ -116,6 +121,7 @@ class RetrievalService:
             w_dense=w_d,
             w_keyword=w_k,
             allowed_origin_types=origin_frozen,
+            version_statuses=version_statuses,
         )
         t_merge = time.perf_counter()
         ranked = rerank(merged, top_n=r_top_n, settings=self._settings)

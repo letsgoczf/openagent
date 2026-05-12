@@ -218,6 +218,74 @@ def test_retrieval_candidate_debug_flag(tmp_path) -> None:
     qd.close()
 
 
+def test_retrieval_excludes_failed_document_versions(tmp_path) -> None:
+    db = tmp_path / "status.db"
+    store = SQLiteStore(db)
+    good_doc, good_ver = str(uuid.uuid4()), str(uuid.uuid4())
+    bad_doc, bad_ver = str(uuid.uuid4()), str(uuid.uuid4())
+    good_cid, bad_cid = str(uuid.uuid4()), str(uuid.uuid4())
+    store.insert_document(good_doc, "/x/good.pdf", "good.pdf", "pdf")
+    store.insert_document_version(good_ver, good_doc, "h-good", "ev1", "tok", "completed")
+    store.insert_chunk(
+        good_cid,
+        good_ver,
+        "text",
+        0,
+        "safe poison answer",
+        {"page_number": 1},
+        page_number=1,
+    )
+    store.insert_document(bad_doc, "/x/bad.pdf", "bad.pdf", "pdf")
+    store.insert_document_version(bad_ver, bad_doc, "h-bad", "ev1", "tok", "failed")
+    store.insert_chunk(
+        bad_cid,
+        bad_ver,
+        "text",
+        0,
+        "poison leaked secret",
+        {"page_number": 2},
+        page_number=2,
+    )
+
+    qd = QdrantStore("status_filter", vector_size=4, location=":memory:")
+    qd.ensure_collection()
+    vec = [1.0, 0.0, 0.0, 0.0]
+    qd.upsert_embedding(
+        vec,
+        chunk_id=good_cid,
+        version_id=good_ver,
+        origin_type="text",
+        unit_type="pdf_page",
+        unit_number=1,
+    )
+    qd.upsert_embedding(
+        vec,
+        chunk_id=bad_cid,
+        version_id=bad_ver,
+        origin_type="text",
+        unit_type="pdf_page",
+        unit_number=2,
+    )
+
+    svc = RetrievalService(store, qd, TokenizerService(model_id="gpt-4"), settings=_settings())
+    result = svc.retrieve(
+        "poison",
+        vec,
+        top_k_dense=5,
+        top_k_keyword=5,
+        rerank_top_n=5,
+        persist_evidence_cache=False,
+    )
+
+    evidence_ids = {entry.chunk_id for entry in result.evidence_entries}
+    citation_ids = {citation.chunk_id for citation in result.citations}
+    assert good_cid in evidence_ids
+    assert bad_cid not in evidence_ids
+    assert bad_cid not in citation_ids
+    store.close()
+    qd.close()
+
+
 def test_truncate_respects_budget() -> None:
     tok = TokenizerService(encoding_name="cl100k_base")
     t = "hello " * 100

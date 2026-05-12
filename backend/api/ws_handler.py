@@ -57,6 +57,18 @@ async def ws_endpoint(ws: WebSocket) -> None:
         client_request_id = str(data.get("client_request_id") or "req_unknown")
         query = str(data.get("query") or "")
         stream = bool(data.get("stream", True))
+        raw_version_scope = data.get("version_scope")
+        version_scope = (
+            [
+                str(version_id).strip()
+                for version_id in raw_version_scope
+                if version_id is not None and str(version_id).strip()
+            ]
+            if isinstance(raw_version_scope, list)
+            else None
+        )
+        if not version_scope:
+            version_scope = None
         raw_sid = data.get("session_id")
         session_id = (
             str(raw_sid).strip()
@@ -176,6 +188,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     KernelEngine().run_chat,
                     query,
                     session_id=session_id,
+                    version_scope=version_scope,
                     budget=budget,
                     stream=stream,
                     stream_writer=stream_writer if stream else None,
