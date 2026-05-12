@@ -90,3 +90,35 @@ def test_ws_chat_completed_answer_is_string() -> None:
                 break
         else:
             raise AssertionError("no chat.completed")
+
+
+def test_ws_chat_start_forwards_version_scope() -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_chat(_self, query: str, **kwargs):
+        captured["query"] = query
+        captured["kwargs"] = kwargs
+        return _fake_run_chat(_self, query, **kwargs)
+
+    client = TestClient(app)
+    with patch("backend.api.ws_handler.KernelEngine.run_chat", fake_run_chat):
+        with client.websocket_connect("/ws") as ws:
+            ws.send_json(
+                {
+                    "type": "chat.start",
+                    "client_request_id": "req_scope",
+                    "query": "hello",
+                    "version_scope": [" v1 ", "", "v2"],
+                    "stream": False,
+                }
+            )
+            for _ in range(50):
+                msg = ws.receive_json()
+                if msg.get("type") == "chat.completed":
+                    break
+            else:
+                raise AssertionError("no chat.completed")
+
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["version_scope"] == ["v1", "v2"]
