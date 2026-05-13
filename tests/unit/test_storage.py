@@ -163,3 +163,42 @@ def test_ui_chat_state_roundtrip(sqlite_db: SQLiteStore) -> None:
     assert rows[0]["title"] == "hi"
     assert rows[0]["updatedAt"] == 42
     assert rows[0]["messages"][0]["content"] == "x"
+
+
+def test_ui_chat_state_rejects_blank_id_without_erasing_existing_rows(
+    sqlite_db: SQLiteStore,
+) -> None:
+    sqlite_db.put_ui_chat_state(
+        active_session_id="s_keep",
+        sessions=[
+            {
+                "id": "s_keep",
+                "title": "keep",
+                "updatedAt": 1,
+                "messages": [{"id": "m1", "role": "user", "content": "saved"}],
+                "lastEvidenceEntries": [],
+                "lastCitations": [],
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match="session id"):
+        sqlite_db.put_ui_chat_state(
+            active_session_id=" ",
+            sessions=[
+                {
+                    "id": " ",
+                    "title": "bad",
+                    "updatedAt": 2,
+                    "messages": [],
+                    "lastEvidenceEntries": [],
+                    "lastCitations": [],
+                }
+            ],
+        )
+
+    active, rows = sqlite_db.get_ui_chat_state()
+    assert active == "s_keep"
+    assert len(rows) == 1
+    assert rows[0]["id"] == "s_keep"
+    assert rows[0]["messages"][0]["content"] == "saved"
