@@ -525,33 +525,45 @@ class SQLiteStore:
         sessions: list[dict[str, Any]],
     ) -> None:
         """全量替换 UI 会话表（单用户；事务）。"""
+        prepared: list[tuple[str, str, int, str]] = []
+        seen_ids: set[str] = set()
+        for s in sessions:
+            sid = str(s.get("id") or "").strip()
+            if not sid:
+                raise ValueError("session id must not be empty")
+            if sid in seen_ids:
+                raise ValueError("duplicate session id")
+            seen_ids.add(sid)
+            title = str(s.get("title") or "新会话")
+            updated = int(s.get("updatedAt") or 0)
+            payload = {
+                "messages": s.get("messages") or [],
+                "lastEvidenceEntries": s.get("lastEvidenceEntries") or [],
+                "lastCitations": s.get("lastCitations") or [],
+            }
+            prepared.append((sid, title, updated, json.dumps(payload, ensure_ascii=False)))
+
+        active = (active_session_id or "").strip()
+        if active and active not in seen_ids:
+            raise ValueError("active_session_id must refer to an existing session")
+
         self._conn.execute("BEGIN")
         try:
             self._conn.execute("DELETE FROM ui_chat_session")
-            for s in sessions:
-                sid = str(s.get("id") or "").strip()
-                if not sid:
-                    continue
-                title = str(s.get("title") or "新会话")
-                updated = int(s.get("updatedAt") or 0)
-                payload = {
-                    "messages": s.get("messages") or [],
-                    "lastEvidenceEntries": s.get("lastEvidenceEntries") or [],
-                    "lastCitations": s.get("lastCitations") or [],
-                }
+            for sid, title, updated, payload_json in prepared:
                 self._conn.execute(
                     """
                     INSERT INTO ui_chat_session (session_id, title, updated_at_ms, payload_json)
                     VALUES (?, ?, ?, ?)
                     """,
-                    (sid, title, updated, json.dumps(payload, ensure_ascii=False)),
+                    (sid, title, updated, payload_json),
                 )
             self._conn.execute(
                 """
                 INSERT INTO ui_preferences (key, value) VALUES (?, ?)
                 ON CONFLICT(key) DO UPDATE SET value = excluded.value
                 """,
-                ("active_chat_session_id", active_session_id or ""),
+                ("active_chat_session_id", active),
             )
             self._conn.commit()
         except Exception:

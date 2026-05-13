@@ -33,6 +33,20 @@ def _normalize_answer_text(raw: Any) -> str:
         return str(raw)
 
 
+def _normalize_version_scope(raw: Any) -> list[str] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise ValueError("version_scope must be a list")
+    values: list[str] = []
+    for item in raw:
+        value = str(item).strip()
+        if not value:
+            raise ValueError("version_scope entries must not be empty")
+        values.append(value)
+    return values or None
+
+
 @ws_router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
     await ws.accept()
@@ -63,6 +77,17 @@ async def ws_endpoint(ws: WebSocket) -> None:
             if raw_sid is not None and str(raw_sid).strip()
             else None
         )
+        try:
+            version_scope = _normalize_version_scope(data.get("version_scope"))
+        except ValueError as e:
+            await ws.send_json(
+                {
+                    "type": "chat.failed",
+                    "client_request_id": client_request_id,
+                    "error": {"message": str(e)},
+                }
+            )
+            continue
         if not query:
             await ws.send_json(
                 {
@@ -176,6 +201,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     KernelEngine().run_chat,
                     query,
                     session_id=session_id,
+                    version_scope=version_scope,
                     budget=budget,
                     stream=stream,
                     stream_writer=stream_writer if stream else None,
