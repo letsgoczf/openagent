@@ -8,6 +8,9 @@ from typing import Any
 from backend.storage.schema import apply_schema
 
 
+RETRIEVABLE_DOCUMENT_VERSION_STATUSES = ("completed", "ready")
+
+
 class SQLiteStore:
     """SQLite persistence for documents, chunks (with FTS5), page_stats, trace_event."""
 
@@ -126,10 +129,13 @@ class SQLiteStore:
         limit: int = 10,
         version_ids: list[str] | None = None,
         origin_types: list[str] | None = None,
+        version_statuses: list[str] | tuple[str, ...] | None = None,
     ) -> list[dict[str, Any]]:
         """Keyword search over chunk_text; bm25 score (lower is better). Optional version / origin filter."""
         cond_version = ""
         cond_origin = ""
+        cond_status = ""
+        join_status = ""
         extra_args: list[Any] = []
         if version_ids:
             placeholders = ",".join("?" * len(version_ids))
@@ -139,27 +145,52 @@ class SQLiteStore:
             ph = ",".join("?" * len(origin_types))
             cond_origin = f" AND c.origin_type IN ({ph})"
             extra_args.extend(origin_types)
+        if version_statuses:
+            ph = ",".join("?" * len(version_statuses))
+            join_status = " JOIN document_version v ON v.version_id = c.version_id"
+            cond_status = f" AND v.status IN ({ph})"
+            extra_args.extend(version_statuses)
 
         sql = f"""
             SELECT c.chunk_id, bm25(chunk_fts) AS score
             FROM chunk_fts
             JOIN chunk c ON c.rowid = chunk_fts.rowid
-            WHERE chunk_fts MATCH ?{cond_version}{cond_origin}
+            {join_status}
+            WHERE chunk_fts MATCH ?{cond_version}{cond_origin}{cond_status}
             ORDER BY score
             LIMIT ?
         """
         cur = self._conn.execute(sql, (query, *extra_args, limit))
         return [{"chunk_id": r["chunk_id"], "score": r["score"]} for r in cur.fetchall()]
 
-    def get_chunks_by_ids(self, chunk_ids: list[str]) -> dict[str, dict[str, Any]]:
+    def get_chunks_by_ids(
+        self,
+        chunk_ids: list[str],
+        *,
+        version_statuses: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, dict[str, Any]]:
         """Return chunk_id -> row dicts (with ``source_span`` parsed)."""
         if not chunk_ids:
             return {}
         placeholders = ",".join("?" * len(chunk_ids))
-        rows = self._conn.execute(
-            f"SELECT * FROM chunk WHERE chunk_id IN ({placeholders})",
-            chunk_ids,
-        ).fetchall()
+        args: list[Any] = list(chunk_ids)
+        if version_statuses:
+            status_placeholders = ",".join("?" * len(version_statuses))
+            rows = self._conn.execute(
+                f"""
+                SELECT c.*
+                FROM chunk c
+                JOIN document_version v ON v.version_id = c.version_id
+                WHERE c.chunk_id IN ({placeholders})
+                  AND v.status IN ({status_placeholders})
+                """,
+                [*args, *version_statuses],
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                f"SELECT * FROM chunk WHERE chunk_id IN ({placeholders})",
+                args,
+            ).fetchall()
         out: dict[str, dict[str, Any]] = {}
         for row in rows:
             d = dict(row)

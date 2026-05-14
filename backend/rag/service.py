@@ -14,7 +14,10 @@ from backend.rag.keyword_recall import keyword_recall
 from backend.rag.merge import merge_and_dedup
 from backend.rag.reranker import rerank
 from backend.storage.qdrant_store import QdrantStore
-from backend.storage.sqlite_store import SQLiteStore
+from backend.storage.sqlite_store import (
+    RETRIEVABLE_DOCUMENT_VERSION_STATUSES,
+    SQLiteStore,
+)
 
 
 @dataclass
@@ -85,6 +88,7 @@ class RetrievalService:
         allowed = self._settings.rag.allowed_origin_types
         origin_list = list(allowed) if allowed else None
         origin_frozen = frozenset(allowed) if allowed else None
+        retrievable_statuses = list(RETRIEVABLE_DOCUMENT_VERSION_STATUSES)
 
         t0 = time.perf_counter()
         d_hits = dense_recall(
@@ -102,6 +106,7 @@ class RetrievalService:
                 top_k=tk_k,
                 version_ids=version_scope,
                 allowed_origin_types=origin_list,
+                version_statuses=retrievable_statuses,
             )
         except Exception as e:  # noqa: BLE001
             # keyword 通道兜底：dense-only
@@ -116,6 +121,7 @@ class RetrievalService:
             w_dense=w_d,
             w_keyword=w_k,
             allowed_origin_types=origin_frozen,
+            version_statuses=retrievable_statuses,
         )
         t_merge = time.perf_counter()
         ranked = rerank(merged, top_n=r_top_n, settings=self._settings)

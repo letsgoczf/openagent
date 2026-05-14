@@ -33,6 +33,7 @@ def keyword_recall(
     top_k: int,
     version_ids: list[str] | None = None,
     allowed_origin_types: list[str] | None = None,
+    version_statuses: list[str] | tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     """SQLite FTS5 top-k; bm25 score (lower is better)."""
     sq = sanitize_fts5_query(query)
@@ -42,6 +43,7 @@ def keyword_recall(
             limit=top_k,
             version_ids=version_ids,
             origin_types=allowed_origin_types,
+            version_statuses=version_statuses,
         )
     except Exception:  # noqa: BLE001
         # 降级：keyword 通道失败时不阻断整条 RAG 链路
