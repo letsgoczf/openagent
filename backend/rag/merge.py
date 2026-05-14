@@ -73,6 +73,7 @@ def merge_and_dedup(
     w_dense: float = 0.5,
     w_keyword: float = 0.5,
     allowed_origin_types: frozenset[str] | None = None,
+    version_statuses: list[str] | tuple[str, ...] | None = None,
 ) -> list[MergedCandidate]:
     """chunk_id 去重；dense / keyword 各自 min-max 归一后加权合成 merged_score（可选来源过滤）。"""
     dense_map = _dedup_dense_best(dense_hits)
@@ -85,7 +86,7 @@ def merge_and_dedup(
     if not chunk_ids:
         return []
 
-    rows = sqlite.get_chunks_by_ids(list(chunk_ids))
+    rows = sqlite.get_chunks_by_ids(list(chunk_ids), version_statuses=version_statuses)
 
     candidates: list[MergedCandidate] = []
     for cid in sorted(chunk_ids):

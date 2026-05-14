@@ -218,6 +218,69 @@ def test_retrieval_candidate_debug_flag(tmp_path) -> None:
     qd.close()
 
 
+def test_retrieval_excludes_failed_document_versions(tmp_path) -> None:
+    db = tmp_path / "failed.db"
+    store = SQLiteStore(db)
+    doc_ready, ver_ready = str(uuid.uuid4()), str(uuid.uuid4())
+    doc_failed, ver_failed = str(uuid.uuid4()), str(uuid.uuid4())
+    cid_ready, cid_failed = str(uuid.uuid4()), str(uuid.uuid4())
+    store.insert_document(doc_ready, "/ready", "ready.pdf", "pdf")
+    store.insert_document_version(ver_ready, doc_ready, "h1", "ev1", "tok", "completed")
+    store.insert_chunk(
+        cid_ready,
+        ver_ready,
+        "text",
+        0,
+        "shared critical answer from completed import",
+        {"page_number": 1},
+        page_number=1,
+    )
+    store.insert_document(doc_failed, "/failed", "failed.pdf", "pdf")
+    store.insert_document_version(ver_failed, doc_failed, "h2", "ev1", "tok", "failed")
+    store.insert_chunk(
+        cid_failed,
+        ver_failed,
+        "text",
+        0,
+        "shared critical answer from failed import",
+        {"page_number": 2},
+        page_number=2,
+    )
+
+    qd = QdrantStore("failed_versions", vector_size=4, location=":memory:")
+    qd.ensure_collection()
+    vec = [1.0, 0.0, 0.0, 0.0]
+    for cid, vid in ((cid_ready, ver_ready), (cid_failed, ver_failed)):
+        qd.upsert_embedding(
+            vec,
+            chunk_id=cid,
+            version_id=vid,
+            origin_type="text",
+            unit_type="pdf_page",
+            unit_number=1,
+        )
+
+    svc = RetrievalService(store, qd, TokenizerService(model_id="gpt-4"), settings=_settings())
+    result = svc.retrieve(
+        "shared critical answer",
+        vec,
+        top_k_dense=10,
+        top_k_keyword=10,
+        rerank_top_n=10,
+        candidate_debug=True,
+    )
+
+    evidence_ids = {entry.chunk_id for entry in result.evidence_entries}
+    assert cid_ready in evidence_ids
+    assert cid_failed not in evidence_ids
+    assert result.candidate_debug is not None
+    assert any(hit.get("chunk_id") == cid_failed for hit in result.candidate_debug["dense_hits"])
+    assert all(hit.get("chunk_id") != cid_failed for hit in result.candidate_debug["keyword_hits"])
+
+    store.close()
+    qd.close()
+
+
 def test_truncate_respects_budget() -> None:
     tok = TokenizerService(encoding_name="cl100k_base")
     t = "hello " * 100
