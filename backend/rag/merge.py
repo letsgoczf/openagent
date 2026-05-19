@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from backend.storage.sqlite_store import SQLiteStore
+from backend.storage.sqlite_store import RETRIEVABLE_DOCUMENT_VERSION_STATUSES, SQLiteStore
 
 
 @dataclass
@@ -85,7 +85,10 @@ def merge_and_dedup(
     if not chunk_ids:
         return []
 
-    rows = sqlite.get_chunks_by_ids(list(chunk_ids))
+    rows = sqlite.get_chunks_by_ids(
+        list(chunk_ids),
+        version_statuses=RETRIEVABLE_DOCUMENT_VERSION_STATUSES,
+    )
 
     candidates: list[MergedCandidate] = []
     for cid in sorted(chunk_ids):
