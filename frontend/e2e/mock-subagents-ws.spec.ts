@@ -138,7 +138,7 @@ test.describe("mock WebSocket sub-agents", () => {
     await textbox.fill("任意问题");
     await page.getByRole("button", { name: "发送" }).click();
 
-    await expect(page.getByRole("alert")).toContainText("WebSocket 连接已断开");
+    await expect(page.getByText("WebSocket 连接已断开，请重试")).toBeVisible();
     await expect(textbox).toBeEnabled();
     await expect(page.getByRole("button", { name: "新建" })).toBeEnabled();
   });
