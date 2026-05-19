@@ -394,7 +394,19 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         })
       );
 
-      const ws = new WebSocket(wsUrl());
+      let ws: WebSocket;
+      try {
+        ws = new WebSocket(wsUrl());
+      } catch (e) {
+        streamingSessionIdRef.current = null;
+        activeRequestIdRef.current = null;
+        setStreamingCitations([]);
+        setError(
+          e instanceof Error ? e.message : "无法创建 WebSocket 连接，请检查 API 地址"
+        );
+        setStatus("error");
+        return;
+      }
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -649,6 +661,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       };
 
       ws.onerror = () => {
+        if (activeRequestIdRef.current !== clientRequestId) return;
         streamingSessionIdRef.current = null;
         activeRequestIdRef.current = null;
         setStreamingCitations([]);
@@ -657,7 +670,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       };
 
       ws.onclose = () => {
-        wsRef.current = null;
+        if (wsRef.current === ws) {
+          wsRef.current = null;
+        }
+        if (activeRequestIdRef.current !== clientRequestId) return;
+        streamingSessionIdRef.current = null;
+        activeRequestIdRef.current = null;
+        setStreamingCitations([]);
+        setError("WebSocket 连接已断开，请重试");
+        setStatus("error");
       };
     },
     [appendTrace]
