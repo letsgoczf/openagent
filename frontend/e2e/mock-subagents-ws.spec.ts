@@ -101,7 +101,9 @@ test.describe("mock WebSocket sub-agents", () => {
     });
 
     await page.goto("/chat");
-    await page.getByLabel("消息").fill("任意问题");
+    const textbox = page.getByRole("textbox", { name: "消息" });
+    await expect(textbox).toBeEnabled();
+    await textbox.fill("任意问题");
     await page.getByRole("button", { name: "发送" }).click();
 
     // 严格模式：页面上多处 JSON trace 也包含 sub_mock_1，只断言「子智能体」区块内可见
@@ -131,11 +133,13 @@ test.describe("mock WebSocket sub-agents", () => {
     });
 
     await page.goto("/chat");
-    await page.getByLabel("消息").fill("任意问题");
+    const textbox = page.getByRole("textbox", { name: "消息" });
+    await expect(textbox).toBeEnabled();
+    await textbox.fill("任意问题");
     await page.getByRole("button", { name: "发送" }).click();
 
     await expect(page.getByRole("alert")).toContainText("WebSocket 连接已断开");
-    await expect(page.getByLabel("消息")).toBeEnabled();
+    await expect(textbox).toBeEnabled();
     await expect(page.getByRole("button", { name: "新建" })).toBeEnabled();
   });
 });
