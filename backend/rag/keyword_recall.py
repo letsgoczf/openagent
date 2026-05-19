@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from backend.storage.sqlite_store import SQLiteStore
+from backend.storage.sqlite_store import RETRIEVABLE_DOCUMENT_VERSION_STATUSES, SQLiteStore
 
 
 def sanitize_fts5_query(raw: str) -> str:
@@ -42,6 +42,7 @@ def keyword_recall(
             limit=top_k,
             version_ids=version_ids,
             origin_types=allowed_origin_types,
+            version_statuses=RETRIEVABLE_DOCUMENT_VERSION_STATUSES,
         )
     except Exception:  # noqa: BLE001
         # 降级：keyword 通道失败时不阻断整条 RAG 链路
