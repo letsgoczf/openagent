@@ -53,6 +53,29 @@ def _settings() -> OpenAgentSettings:
     )
 
 
+def _seed_retrieval_chunk(
+    store: SQLiteStore,
+    qdrant: QdrantStore,
+    *,
+    status: str,
+    text: str,
+    vector: list[float],
+) -> tuple[str, str, str]:
+    doc_id, ver_id, cid = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+    store.insert_document(doc_id, f"/x/{doc_id}.pdf", f"{doc_id}.pdf", "pdf")
+    store.insert_document_version(ver_id, doc_id, f"h-{doc_id}", "ev1", "tok", status)
+    store.insert_chunk(cid, ver_id, "text", 0, text, {"page_number": 1}, page_number=1)
+    qdrant.upsert_embedding(
+        vector,
+        chunk_id=cid,
+        version_id=ver_id,
+        origin_type="text",
+        unit_type="pdf_page",
+        unit_number=1,
+    )
+    return doc_id, ver_id, cid
+
+
 def test_merge_dedup_single_chunk() -> None:
     store = SQLiteStore(":memory:")
     doc_id, ver_id = str(uuid.uuid4()), str(uuid.uuid4())
@@ -240,3 +263,42 @@ def test_keyword_recall_fallback_on_store_error() -> None:
     store.query_fts5.side_effect = RuntimeError("fts5 boom")
     out = keyword_recall(store, "a-b", top_k=5)  # type: ignore[arg-type]
     assert out == []
+
+
+def test_retrieval_default_scope_excludes_unfinished_versions(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "scope.db")
+    qd = QdrantStore("scope_chunks", vector_size=4, location=":memory:")
+    qd.ensure_collection()
+    vec = [1.0, 0.0, 0.0, 0.0]
+
+    _, ready_ver, _ = _seed_retrieval_chunk(
+        store, qd, status="ready", text="alpha legacy ready", vector=vec
+    )
+    _, completed_ver, _ = _seed_retrieval_chunk(
+        store, qd, status="completed", text="alpha finished document", vector=vec
+    )
+    _, processing_ver, _ = _seed_retrieval_chunk(
+        store, qd, status="processing", text="alpha half indexed draft", vector=vec
+    )
+    _, failed_ver, _ = _seed_retrieval_chunk(
+        store, qd, status="failed", text="alpha failed import residue", vector=vec
+    )
+
+    svc = RetrievalService(store, qd, TokenizerService(model_id="gpt-4"), settings=_settings())
+    result = svc.retrieve(
+        "alpha",
+        vec,
+        top_k_dense=10,
+        top_k_keyword=10,
+        rerank_top_n=10,
+        persist_evidence_cache=False,
+    )
+
+    returned_versions = {entry.version_id for entry in result.evidence_entries}
+    assert returned_versions == {ready_ver, completed_ver}
+    assert processing_ver not in returned_versions
+    assert failed_ver not in returned_versions
+    assert result.retrieval_state["version_scope_source"] == "default_retrievable"
+
+    store.close()
+    qd.close()
