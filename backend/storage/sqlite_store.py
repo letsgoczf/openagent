@@ -8,6 +8,9 @@ from typing import Any
 from backend.storage.schema import apply_schema
 
 
+RETRIEVABLE_DOCUMENT_VERSION_STATUSES = ("ready", "completed")
+
+
 class SQLiteStore:
     """SQLite persistence for documents, chunks (with FTS5), page_stats, trace_event."""
 
@@ -319,6 +322,20 @@ class SQLiteStore:
             ORDER BY rowid ASC
             """,
             (doc_id,),
+        ).fetchall()
+        return [str(r["version_id"]) for r in rows]
+
+    def list_retrievable_version_ids(self) -> list[str]:
+        """Versions eligible for default RAG retrieval."""
+        placeholders = ",".join("?" * len(RETRIEVABLE_DOCUMENT_VERSION_STATUSES))
+        rows = self._conn.execute(
+            f"""
+            SELECT version_id
+            FROM document_version
+            WHERE status IN ({placeholders})
+            ORDER BY rowid ASC
+            """,
+            RETRIEVABLE_DOCUMENT_VERSION_STATUSES,
         ).fetchall()
         return [str(r["version_id"]) for r in rows]
 
