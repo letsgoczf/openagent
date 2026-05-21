@@ -139,6 +139,47 @@ def test_qdrant_delete_by_version_ids() -> None:
     store.close()
 
 
+def test_empty_version_filters_do_not_search_all(sqlite_db: SQLiteStore) -> None:
+    _, _, chunk_id = _seed_doc(sqlite_db, "alpha beta gamma uniqueword")
+
+    assert sqlite_db.query_fts5("uniqueword", limit=5, version_ids=[]) == []
+
+    store = QdrantStore("empty_versions", vector_size=3, location=":memory:")
+    store.ensure_collection()
+    vec = [1.0, 0.0, 0.0]
+    store.upsert_embedding(
+        vec,
+        chunk_id=chunk_id,
+        version_id="v1",
+        origin_type="text",
+        unit_type="page",
+        unit_number=1,
+    )
+    assert store.search(vec, limit=5, version_ids=[]) == []
+    store.close()
+
+
+def test_qdrant_store_closes_owned_injected_client() -> None:
+    class FakeClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    client = FakeClient()
+    store = QdrantStore(
+        "owned_client",
+        vector_size=3,
+        client=client,  # type: ignore[arg-type]
+        owns_client=True,
+    )
+
+    store.close()
+
+    assert client.closed is True
+
+
 def test_ui_chat_state_roundtrip(sqlite_db: SQLiteStore) -> None:
     active, sessions = sqlite_db.get_ui_chat_state()
     assert active is None

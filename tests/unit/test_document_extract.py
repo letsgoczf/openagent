@@ -2,6 +2,7 @@
 
 import pytest
 
+import backend.ingestion.document_extract as document_extract
 from backend.ingestion.document_extract import (
     DocumentExtractionError,
     extract_document_pages,
@@ -36,3 +37,15 @@ def test_reject_old_doc_magic() -> None:
 def test_empty_file() -> None:
     with pytest.raises(DocumentExtractionError):
         extract_document_pages(b"", "empty.txt")
+
+
+def test_pdf_extraction_preserves_blank_page_positions(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        document_extract,
+        "_extract_pdf_pages",
+        lambda _file_bytes: ["page one", "", "page three"],
+    )
+
+    pages = extract_document_pages(b"%PDF- fake", "x.pdf")
+
+    assert pages == ["page one", "", "page three"]
