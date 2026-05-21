@@ -463,5 +463,7 @@ def extract_document_pages(file_bytes: bytes, filename: str) -> list[str]:
         raise DocumentExtractionError(f"文档解析失败：{e}") from e
     if not isinstance(pages, list):
         raise DocumentExtractionError("抽取结果异常")
+    if key == "pdf":
+        return [p if isinstance(p, str) else "" for p in pages]
     # 统一去掉全空段
     return [p for p in pages if isinstance(p, str) and p.strip()]

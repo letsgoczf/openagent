@@ -8,6 +8,9 @@ from typing import Any
 from backend.storage.schema import apply_schema
 
 
+RETRIEVABLE_DOCUMENT_VERSION_STATUSES = ("completed", "ready")
+
+
 class SQLiteStore:
     """SQLite persistence for documents, chunks (with FTS5), page_stats, trace_event."""
 
@@ -128,6 +131,8 @@ class SQLiteStore:
         origin_types: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Keyword search over chunk_text; bm25 score (lower is better). Optional version / origin filter."""
+        if version_ids is not None and not version_ids:
+            return []
         cond_version = ""
         cond_origin = ""
         extra_args: list[Any] = []
@@ -319,6 +324,20 @@ class SQLiteStore:
             ORDER BY rowid ASC
             """,
             (doc_id,),
+        ).fetchall()
+        return [str(r["version_id"]) for r in rows]
+
+    def list_retrievable_version_ids(self) -> list[str]:
+        """Versions safe for default retrieval; excludes failed or in-progress imports."""
+        placeholders = ",".join("?" * len(RETRIEVABLE_DOCUMENT_VERSION_STATUSES))
+        rows = self._conn.execute(
+            f"""
+            SELECT version_id
+            FROM document_version
+            WHERE status IN ({placeholders})
+            ORDER BY rowid ASC
+            """,
+            RETRIEVABLE_DOCUMENT_VERSION_STATUSES,
         ).fetchall()
         return [str(r["version_id"]) for r in rows]
 

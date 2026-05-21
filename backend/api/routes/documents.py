@@ -42,7 +42,12 @@ def _run_document_import_job(
 
     dim = _resolve_embedding_dim(cfg)
     qclient = build_qdrant_client(cfg.storage.qdrant)
-    qdrant = QdrantStore(cfg.storage.qdrant.collection_name, vector_size=dim, client=qclient)
+    qdrant = QdrantStore(
+        cfg.storage.qdrant.collection_name,
+        vector_size=dim,
+        client=qclient,
+        owns_client=True,
+    )
 
     trace = TraceWriter(sqlite, job_id)
     tokenizer = create_tokenizer_service(cfg)
@@ -166,6 +171,11 @@ def _run_document_import_job(
                 },
             )
 
+        if processed_chunks == 0:
+            trace.emit("job_failed", {"error": "no extractable text in document"})
+            sqlite.update_document_version_status(version_id, status="failed")
+            return
+
         sqlite.update_document_version_status(version_id, status="completed")
         trace.emit("job_completed", {"doc_id": doc_id, "version_id": version_id})
     except Exception as e:  # noqa: BLE001
@@ -212,7 +222,12 @@ async def delete_document(doc_id: str) -> dict[str, Any]:
     sqlite = SQLiteStore(cfg.storage.sqlite_path)
     dim = _resolve_embedding_dim(cfg)
     qclient = build_qdrant_client(cfg.storage.qdrant)
-    qdrant = QdrantStore(cfg.storage.qdrant.collection_name, vector_size=dim, client=qclient)
+    qdrant = QdrantStore(
+        cfg.storage.qdrant.collection_name,
+        vector_size=dim,
+        client=qclient,
+        owns_client=True,
+    )
     try:
         doc = sqlite.get_document_summary(doc_id)
         if doc is None:

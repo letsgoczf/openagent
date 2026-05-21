@@ -25,6 +25,7 @@ class QdrantStore:
         client: QdrantClient | None = None,
         *,
         location: str | None = None,
+        owns_client: bool | None = None,
     ) -> None:
         self.collection_name = collection_name
         self.vector_size = vector_size
@@ -34,7 +35,7 @@ class QdrantStore:
             self._client = QdrantClient(location=location)
         else:
             self._client = QdrantClient(location=":memory:")
-        self._owns_client = client is None
+        self._owns_client = (client is None) if owns_client is None else owns_client
 
     @property
     def client(self) -> QdrantClient:
@@ -89,6 +90,8 @@ class QdrantStore:
         version_id: str | None = None,
         version_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
+        if version_ids is not None and not version_ids:
+            return []
         self.ensure_collection()
         qf = None
         if version_ids:
