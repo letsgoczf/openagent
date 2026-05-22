@@ -218,6 +218,63 @@ def test_retrieval_candidate_debug_flag(tmp_path) -> None:
     qd.close()
 
 
+def test_retrieval_excludes_unfinished_or_failed_versions(tmp_path) -> None:
+    db = tmp_path / "status.db"
+    store = SQLiteStore(db)
+    qd = QdrantStore(f"status_{uuid.uuid4().hex}", vector_size=4, location=":memory:")
+    qd.ensure_collection()
+    vec = [1.0, 0.0, 0.0, 0.0]
+    version_by_status: dict[str, str] = {}
+
+    for i, status in enumerate(["ready", "completed", "processing", "failed"]):
+        doc_id = str(uuid.uuid4())
+        ver_id = str(uuid.uuid4())
+        cid = str(uuid.uuid4())
+        version_by_status[status] = ver_id
+        store.insert_document(doc_id, f"/x/{status}.pdf", f"{status}.pdf", "pdf")
+        store.insert_document_version(ver_id, doc_id, f"h-{status}", "ev1", "tok", status)
+        store.insert_chunk(
+            cid,
+            ver_id,
+            "text",
+            i,
+            f"alpha {status}",
+            {"page_number": i + 1},
+            page_number=i + 1,
+        )
+        qd.upsert_embedding(
+            vec,
+            chunk_id=cid,
+            version_id=ver_id,
+            origin_type="text",
+            unit_type="pdf_page",
+            unit_number=i + 1,
+        )
+
+    svc = RetrievalService(store, qd, TokenizerService(model_id="gpt-4"), settings=_settings())
+    result = svc.retrieve("alpha", vec, top_k_dense=10, top_k_keyword=10, rerank_top_n=10)
+    returned_versions = {entry.version_id for entry in result.evidence_entries}
+
+    assert version_by_status["ready"] in returned_versions
+    assert version_by_status["completed"] in returned_versions
+    assert version_by_status["processing"] not in returned_versions
+    assert version_by_status["failed"] not in returned_versions
+
+    failed_only = svc.retrieve(
+        "alpha",
+        vec,
+        version_scope=[version_by_status["failed"]],
+        top_k_dense=10,
+        top_k_keyword=10,
+        rerank_top_n=10,
+    )
+    assert failed_only.evidence_entries == []
+    assert failed_only.citations == []
+
+    store.close()
+    qd.close()
+
+
 def test_truncate_respects_budget() -> None:
     tok = TokenizerService(encoding_name="cl100k_base")
     t = "hello " * 100
