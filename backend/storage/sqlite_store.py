@@ -322,6 +322,31 @@ class SQLiteStore:
         ).fetchall()
         return [str(r["version_id"]) for r in rows]
 
+    def list_retrievable_version_ids(
+        self,
+        version_ids: list[str] | None = None,
+    ) -> list[str]:
+        """Return versions that are safe to expose through retrieval."""
+        statuses = ("ready", "completed")
+        args: list[Any] = [*statuses]
+        scope_clause = ""
+        if version_ids is not None:
+            if not version_ids:
+                return []
+            placeholders = ",".join("?" * len(version_ids))
+            scope_clause = f" AND version_id IN ({placeholders})"
+            args.extend(version_ids)
+        rows = self._conn.execute(
+            f"""
+            SELECT version_id
+            FROM document_version
+            WHERE status IN (?, ?){scope_clause}
+            ORDER BY rowid ASC
+            """,
+            args,
+        ).fetchall()
+        return [str(r["version_id"]) for r in rows]
+
     def delete_document(self, doc_id: str) -> bool:
         """
         删除 document 及其关联版本/chunk/page_stats（依赖 FK CASCADE）。
@@ -525,13 +550,25 @@ class SQLiteStore:
         sessions: list[dict[str, Any]],
     ) -> None:
         """全量替换 UI 会话表（单用户；事务）。"""
+        normalized_sessions: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for s in sessions:
+            sid = str(s.get("id") or "").strip()
+            if not sid:
+                raise ValueError("chat session id must not be empty")
+            if sid in seen_ids:
+                raise ValueError("duplicate chat session id")
+            seen_ids.add(sid)
+            normalized_sessions.append({**s, "id": sid})
+        active = str(active_session_id).strip() if active_session_id else ""
+        if active and active not in seen_ids:
+            raise ValueError("active chat session id must refer to an existing session")
+
         self._conn.execute("BEGIN")
         try:
             self._conn.execute("DELETE FROM ui_chat_session")
-            for s in sessions:
-                sid = str(s.get("id") or "").strip()
-                if not sid:
-                    continue
+            for s in normalized_sessions:
+                sid = str(s["id"])
                 title = str(s.get("title") or "新会话")
                 updated = int(s.get("updatedAt") or 0)
                 payload = {
@@ -551,7 +588,7 @@ class SQLiteStore:
                 INSERT INTO ui_preferences (key, value) VALUES (?, ?)
                 ON CONFLICT(key) DO UPDATE SET value = excluded.value
                 """,
-                ("active_chat_session_id", active_session_id or ""),
+                ("active_chat_session_id", active),
             )
             self._conn.commit()
         except Exception:

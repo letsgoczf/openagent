@@ -162,6 +162,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   /** 与当前 WebSocket 轮次对齐，丢弃旧连接晚到的 chat.* 事件，避免污染新会话侧栏 */
   const activeRequestIdRef = useRef<string | null>(null);
   const persistSkipRef = useRef(true);
+  const persistEnabledRef = useRef(false);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -182,6 +183,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           setActiveSessionId(
             activeOk ? remote.activeSessionId! : remote.sessions[0]!.id
           );
+          persistEnabledRef.current = true;
           clearLegacyChatSessionsStorage();
         } else {
           const legacy = loadChatSessionsFile();
@@ -191,6 +193,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             clearLegacyChatSessionsStorage();
             setSessions(legacy.sessions);
             setActiveSessionId(legacy.activeSessionId);
+            persistEnabledRef.current = true;
           } else {
             const s = createEmptySession();
             const initial: ChatSessionPersisted[] = [s];
@@ -202,6 +205,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             if (cancelled) return;
             setSessions(initial);
             setActiveSessionId(s.id);
+            persistEnabledRef.current = true;
           }
         }
       } catch (e) {
@@ -215,6 +219,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           const s = createEmptySession();
           setSessions([s]);
           setActiveSessionId(s.id);
+          persistEnabledRef.current = false;
         }
       } finally {
         if (!cancelled) {
@@ -229,7 +234,12 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (!sessionsReady || activeSessionId === null || sessions.length === 0) {
+    if (
+      !sessionsReady ||
+      !persistEnabledRef.current ||
+      activeSessionId === null ||
+      sessions.length === 0
+    ) {
       return;
     }
     if (!sessions.some((s) => s.id === activeSessionId)) {
@@ -649,6 +659,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       };
 
       ws.onerror = () => {
+        if (wsRef.current !== ws) return;
         streamingSessionIdRef.current = null;
         activeRequestIdRef.current = null;
         setStreamingCitations([]);
@@ -657,7 +668,17 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       };
 
       ws.onclose = () => {
+        if (wsRef.current !== ws) return;
         wsRef.current = null;
+        if (activeRequestIdRef.current === clientRequestId) {
+          streamingSessionIdRef.current = null;
+          activeRequestIdRef.current = null;
+          setStreamingCitations([]);
+          setError((prev) => prev ?? "WebSocket connection closed");
+          setStatus((prev) =>
+            prev === "connecting" || prev === "streaming" ? "error" : prev
+          );
+        }
       };
     },
     [appendTrace]

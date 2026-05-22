@@ -85,13 +85,55 @@ class RetrievalService:
         allowed = self._settings.rag.allowed_origin_types
         origin_list = list(allowed) if allowed else None
         origin_frozen = frozenset(allowed) if allowed else None
+        retrievable_version_scope = self._sqlite.list_retrievable_version_ids(
+            version_scope
+        )
 
         t0 = time.perf_counter()
+        if not retrievable_version_scope:
+            t_end = time.perf_counter()
+            return RetrievalResult(
+                evidence_entries=[],
+                citations=[],
+                retrieval_state={
+                    "dense_hits": 0,
+                    "keyword_hits": 0,
+                    "merged_candidates": 0,
+                    "reranked": 0,
+                    "evidence_entries": 0,
+                    "citations": 0,
+                    "timings_ms": {
+                        "dense_recall": 0.0,
+                        "keyword_recall": 0.0,
+                        "merge": 0.0,
+                        "rerank": 0.0,
+                        "evidence_and_citations": 0.0,
+                        "retrieval_total": round((t_end - t0) * 1000, 3),
+                    },
+                    "rerank": {
+                        "strategy": self._settings.rag.rerank.strategy,
+                        "model_id": self._settings.rag.rerank.model_id,
+                    },
+                    "fusion": {
+                        "w_dense": w_d,
+                        "w_keyword": w_k,
+                    },
+                    "allowed_origin_types": origin_list,
+                    "rag_views": None,
+                },
+                candidate_debug={
+                    "dense_hits": [],
+                    "keyword_hits": [],
+                    "merged": [],
+                }
+                if candidate_debug
+                else None,
+            )
         d_hits = dense_recall(
             self._qdrant,
             query_vector,
             top_k=tk_d,
-            version_ids=version_scope,
+            version_ids=retrievable_version_scope,
         )
         t_dense = time.perf_counter()
         kw_error: str | None = None
@@ -100,7 +142,7 @@ class RetrievalService:
                 self._sqlite,
                 query,
                 top_k=tk_k,
-                version_ids=version_scope,
+                version_ids=retrievable_version_scope,
                 allowed_origin_types=origin_list,
             )
         except Exception as e:  # noqa: BLE001
