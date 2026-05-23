@@ -2,6 +2,7 @@
 
 import pytest
 
+import backend.ingestion.document_extract as document_extract
 from backend.ingestion.document_extract import (
     DocumentExtractionError,
     extract_document_pages,
@@ -19,6 +20,20 @@ def test_extract_json() -> None:
     assert '"a": 1' in pages[0]
 
 
+def test_extract_pdf_preserves_blank_page_placeholders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        document_extract,
+        "_extract_pdf_pages",
+        lambda _data: ["page one", "", "page three"],
+    )
+
+    pages = extract_document_pages(b"%PDF-placeholder", "notes.pdf")
+
+    assert pages == ["page one", "", "page three"]
+
+
 def test_extract_rtf_minimal() -> None:
     rtf = rb"{\rtf1\ansi hello}"
     pages = extract_document_pages(rtf, "x.rtf")
@@ -30,7 +45,11 @@ def test_reject_old_doc_magic() -> None:
     ole = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 100
     with pytest.raises(DocumentExtractionError) as ei:
         extract_document_pages(ole, "legacy.doc")
-    assert ".doc" in str(ei.value) or "docx" in str(ei.value).lower() or "OLE" in str(ei.value)
+    assert (
+        ".doc" in str(ei.value)
+        or "docx" in str(ei.value).lower()
+        or "OLE" in str(ei.value)
+    )
 
 
 def test_empty_file() -> None:

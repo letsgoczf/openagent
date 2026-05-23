@@ -139,6 +139,27 @@ def test_qdrant_delete_by_version_ids() -> None:
     store.close()
 
 
+def test_qdrant_store_closes_owned_injected_client() -> None:
+    class FakeClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    client = FakeClient()
+    store = QdrantStore(
+        "owned_client",
+        vector_size=3,
+        client=client,  # type: ignore[arg-type]
+        owns_client=True,
+    )
+
+    store.close()
+
+    assert client.closed is True
+
+
 def test_ui_chat_state_roundtrip(sqlite_db: SQLiteStore) -> None:
     active, sessions = sqlite_db.get_ui_chat_state()
     assert active is None
