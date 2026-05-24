@@ -49,6 +49,39 @@ def test_sqlite_fts5_returns_chunk_id(sqlite_db: SQLiteStore) -> None:
     assert any(h["chunk_id"] == chunk_id for h in hits)
 
 
+def test_sqlite_fts5_excludes_non_retrievable_versions(sqlite_db: SQLiteStore) -> None:
+    ready_doc, ready_ver, ready_chunk = _seed_doc(sqlite_db, "sharedneedle ready")
+    failed_doc = str(uuid.uuid4())
+    failed_ver = str(uuid.uuid4())
+    failed_chunk = str(uuid.uuid4())
+    sqlite_db.insert_document(failed_doc, "/tmp/failed.pdf", "failed.pdf", "pdf")
+    sqlite_db.insert_document_version(
+        failed_ver,
+        failed_doc,
+        "hash2",
+        "ext-v1",
+        "tiktoken:test",
+        "failed",
+    )
+    sqlite_db.insert_chunk(
+        failed_chunk,
+        failed_ver,
+        "text",
+        0,
+        "sharedneedle failed",
+        {"page_number": 1},
+        page_number=1,
+    )
+
+    hits = sqlite_db.query_fts5("sharedneedle", limit=10)
+    hit_ids = {h["chunk_id"] for h in hits}
+    assert ready_doc
+    assert ready_ver
+    assert ready_chunk in hit_ids
+    assert failed_chunk not in hit_ids
+    assert sqlite_db.query_fts5("sharedneedle", limit=10, version_ids=[failed_ver]) == []
+
+
 def test_list_document_summaries(sqlite_db: SQLiteStore) -> None:
     _seed_doc(sqlite_db, "doc body")
     rows = sqlite_db.list_document_summaries()
@@ -137,6 +170,20 @@ def test_qdrant_delete_by_version_ids() -> None:
     assert "c_drop" not in ids
     assert "c_keep" in ids
     store.close()
+
+
+def test_qdrant_store_closes_owned_injected_client() -> None:
+    class FakeClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    client = FakeClient()
+    store = QdrantStore("owned", vector_size=3, client=client, owns_client=True)  # type: ignore[arg-type]
+    store.close()
+    assert client.closed is True
 
 
 def test_ui_chat_state_roundtrip(sqlite_db: SQLiteStore) -> None:

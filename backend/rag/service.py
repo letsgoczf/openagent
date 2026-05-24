@@ -82,6 +82,26 @@ class RetrievalService:
         r_top_n = rerank_top_n if rerank_top_n is not None else b.rerank_top_n
         w_d, w_k = b.w_dense, b.w_keyword
 
+        effective_version_scope = self._sqlite.list_retrievable_version_ids(version_scope)
+        if not effective_version_scope:
+            return RetrievalResult(
+                evidence_entries=[],
+                citations=[],
+                retrieval_state={
+                    "dense_hits": 0,
+                    "keyword_hits": 0,
+                    "merged_candidates": 0,
+                    "reranked": 0,
+                    "evidence_entries": 0,
+                    "citations": 0,
+                    "scoped_version_count": 0,
+                    "rag_views": None,
+                },
+                candidate_debug={"dense_hits": [], "keyword_hits": [], "merged": []}
+                if candidate_debug
+                else None,
+            )
+
         allowed = self._settings.rag.allowed_origin_types
         origin_list = list(allowed) if allowed else None
         origin_frozen = frozenset(allowed) if allowed else None
@@ -91,7 +111,7 @@ class RetrievalService:
             self._qdrant,
             query_vector,
             top_k=tk_d,
-            version_ids=version_scope,
+            version_ids=effective_version_scope,
         )
         t_dense = time.perf_counter()
         kw_error: str | None = None
@@ -100,7 +120,7 @@ class RetrievalService:
                 self._sqlite,
                 query,
                 top_k=tk_k,
-                version_ids=version_scope,
+                version_ids=effective_version_scope,
                 allowed_origin_types=origin_list,
             )
         except Exception as e:  # noqa: BLE001
@@ -158,6 +178,7 @@ class RetrievalService:
             },
             "allowed_origin_types": origin_list,
             "rag_views": None,
+            "scoped_version_count": len(effective_version_scope),
         }
         if kw_error:
             state["keyword_recall_error"] = kw_error

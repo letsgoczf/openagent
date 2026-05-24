@@ -218,6 +218,84 @@ def test_retrieval_candidate_debug_flag(tmp_path) -> None:
     qd.close()
 
 
+def test_retrieval_default_scope_excludes_failed_versions(tmp_path) -> None:
+    db = tmp_path / "scoped.db"
+    store = SQLiteStore(db)
+    ready_doc, ready_ver = str(uuid.uuid4()), str(uuid.uuid4())
+    failed_doc, failed_ver = str(uuid.uuid4()), str(uuid.uuid4())
+    ready_chunk, failed_chunk = str(uuid.uuid4()), str(uuid.uuid4())
+    store.insert_document(ready_doc, "/x/ready.pdf", "ready.pdf", "pdf")
+    store.insert_document_version(ready_ver, ready_doc, "h1", "ev1", "tok", "completed")
+    store.insert_chunk(
+        ready_chunk,
+        ready_ver,
+        "text",
+        0,
+        "sharedneedle ready content",
+        {"page_number": 1},
+        page_number=1,
+    )
+    store.insert_document(failed_doc, "/x/failed.pdf", "failed.pdf", "pdf")
+    store.insert_document_version(failed_ver, failed_doc, "h2", "ev1", "tok", "failed")
+    store.insert_chunk(
+        failed_chunk,
+        failed_ver,
+        "text",
+        0,
+        "sharedneedle failed content",
+        {"page_number": 1},
+        page_number=1,
+    )
+    qd = QdrantStore("scoped", vector_size=4, location=":memory:")
+    qd.ensure_collection()
+    vec = [1.0, 0.0, 0.0, 0.0]
+    qd.upsert_embedding(
+        vec,
+        chunk_id=ready_chunk,
+        version_id=ready_ver,
+        origin_type="text",
+        unit_type="pdf_page",
+        unit_number=1,
+    )
+    qd.upsert_embedding(
+        vec,
+        chunk_id=failed_chunk,
+        version_id=failed_ver,
+        origin_type="text",
+        unit_type="pdf_page",
+        unit_number=1,
+    )
+
+    svc = RetrievalService(store, qd, TokenizerService(model_id="gpt-4"), settings=_settings())
+    result = svc.retrieve(
+        "sharedneedle",
+        vec,
+        top_k_dense=5,
+        top_k_keyword=5,
+        rerank_top_n=5,
+        candidate_debug=True,
+    )
+    assert result.evidence_entries
+    assert {e.version_id for e in result.evidence_entries} == {ready_ver}
+    assert result.retrieval_state["scoped_version_count"] == 1
+    assert result.candidate_debug is not None
+    assert not any(h.get("version_id") == failed_ver for h in result.candidate_debug["dense_hits"])
+
+    failed_only = svc.retrieve(
+        "sharedneedle",
+        vec,
+        version_scope=[failed_ver],
+        top_k_dense=5,
+        top_k_keyword=5,
+        rerank_top_n=5,
+    )
+    assert failed_only.evidence_entries == []
+    assert failed_only.retrieval_state["scoped_version_count"] == 0
+
+    store.close()
+    qd.close()
+
+
 def test_truncate_respects_budget() -> None:
     tok = TokenizerService(encoding_name="cl100k_base")
     t = "hello " * 100
