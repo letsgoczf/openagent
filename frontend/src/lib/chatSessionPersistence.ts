@@ -21,6 +21,7 @@ export interface ChatSessionsFile {
   version: number;
   activeSessionId: string;
   sessions: ChatSessionPersisted[];
+  revision?: number;
 }
 
 function newSessionId(): string {
@@ -96,6 +97,48 @@ export function saveChatSessionsFile(data: ChatSessionsFile): void {
   } catch {
     /* quota or private mode */
   }
+}
+
+export function mergeChatSessionsFiles(
+  remote: ChatSessionsFile,
+  local: ChatSessionsFile
+): ChatSessionsFile {
+  const merged = new Map<string, ChatSessionPersisted>();
+  for (const session of remote.sessions) {
+    merged.set(session.id, session);
+  }
+  let localHasNewerSession = false;
+  for (const session of local.sessions) {
+    const existing = merged.get(session.id);
+    if (!existing || session.updatedAt > existing.updatedAt) {
+      merged.set(session.id, session);
+      localHasNewerSession = true;
+    }
+  }
+  const sessions = [...merged.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+  const ids = new Set(sessions.map((s) => s.id));
+  const preferredActive = localHasNewerSession
+    ? local.activeSessionId
+    : remote.activeSessionId;
+  const activeSessionId = ids.has(preferredActive)
+    ? preferredActive
+    : sessions[0]?.id || "";
+  return {
+    version: CHAT_SESSIONS_VERSION,
+    activeSessionId,
+    sessions,
+    revision: remote.revision,
+  };
+}
+
+export function chatSessionsFileEquals(
+  a: ChatSessionsFile,
+  b: ChatSessionsFile
+): boolean {
+  return (
+    a.activeSessionId === b.activeSessionId &&
+    JSON.stringify(a.sessions) === JSON.stringify(b.sessions)
+  );
 }
 
 /** 迁移到服务端 DB 后清除旧版 localStorage，避免两套数据源混淆 */

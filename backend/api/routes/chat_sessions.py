@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from backend.api.errors import ApiException
 from backend.config_loader import load_config
-from backend.storage.sqlite_store import SQLiteStore
+from backend.storage.sqlite_store import SQLiteStore, UIChatStateRevisionConflict
 
 router = APIRouter(prefix="/v1/chat-sessions", tags=["chat-sessions"])
 
@@ -27,6 +27,7 @@ class ChatSessionsStateDTO(BaseModel):
     version: Literal[1] = 1
     activeSessionId: str | None = None
     sessions: list[ChatSessionPersistedDTO]
+    revision: int | None = None
 
 
 @router.get("/state", response_model=ChatSessionsStateDTO)
@@ -34,18 +35,19 @@ async def get_chat_sessions_state() -> ChatSessionsStateDTO:
     cfg = load_config()
     sqlite = SQLiteStore(cfg.storage.sqlite_path)
     try:
-        active, rows = sqlite.get_ui_chat_state()
+        active, rows, revision = sqlite.get_ui_chat_state()
         return ChatSessionsStateDTO(
             version=1,
             activeSessionId=active,
             sessions=[ChatSessionPersistedDTO.model_validate(s) for s in rows],
+            revision=revision,
         )
     finally:
         sqlite.close()
 
 
 @router.put("/state", response_model=dict)
-async def put_chat_sessions_state(body: ChatSessionsStateDTO) -> dict[str, bool]:
+async def put_chat_sessions_state(body: ChatSessionsStateDTO) -> dict[str, bool | int]:
     if not body.sessions:
         raise ApiException(
             code="chat_sessions.empty",
@@ -70,7 +72,19 @@ async def put_chat_sessions_state(body: ChatSessionsStateDTO) -> dict[str, bool]
     sqlite = SQLiteStore(cfg.storage.sqlite_path)
     try:
         rows = [s.model_dump(mode="json") for s in body.sessions]
-        sqlite.put_ui_chat_state(active_session_id=active, sessions=rows)
-        return {"ok": True}
+        try:
+            revision = sqlite.put_ui_chat_state(
+                active_session_id=active,
+                sessions=rows,
+                expected_revision=body.revision,
+            )
+        except UIChatStateRevisionConflict as exc:
+            raise ApiException(
+                code="chat_sessions.revision_conflict",
+                message="chat sessions were modified by another client; reload before saving",
+                status_code=409,
+                detail={"current_revision": exc.current_revision},
+            ) from exc
+        return {"ok": True, "revision": revision}
     finally:
         sqlite.close()
