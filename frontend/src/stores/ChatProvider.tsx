@@ -163,6 +163,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const activeRequestIdRef = useRef<string | null>(null);
   const persistSkipRef = useRef(true);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const remotePersistenceReadyRef = useRef(false);
+  const stateRevisionRef = useRef<number | null>(null);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -174,6 +176,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       try {
         const remote = await fetchChatSessionsState();
         if (cancelled) return;
+        stateRevisionRef.current = remote.stateRevision ?? 0;
+        remotePersistenceReadyRef.current = true;
         if (remote.sessions.length > 0) {
           const activeOk = remote.sessions.some(
             (s) => s.id === remote.activeSessionId
@@ -186,20 +190,28 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         } else {
           const legacy = loadChatSessionsFile();
           if (legacy && legacy.sessions.length > 0) {
-            await putChatSessionsState(legacy);
+            const saved = await putChatSessionsState(
+              legacy,
+              stateRevisionRef.current
+            );
             if (cancelled) return;
+            stateRevisionRef.current = saved.stateRevision;
             clearLegacyChatSessionsStorage();
             setSessions(legacy.sessions);
             setActiveSessionId(legacy.activeSessionId);
           } else {
             const s = createEmptySession();
             const initial: ChatSessionPersisted[] = [s];
-            await putChatSessionsState({
-              version: CHAT_SESSIONS_VERSION,
-              activeSessionId: s.id,
-              sessions: initial,
-            });
+            const saved = await putChatSessionsState(
+              {
+                version: CHAT_SESSIONS_VERSION,
+                activeSessionId: s.id,
+                sessions: initial,
+              },
+              stateRevisionRef.current
+            );
             if (cancelled) return;
+            stateRevisionRef.current = saved.stateRevision;
             setSessions(initial);
             setActiveSessionId(s.id);
           }
@@ -212,6 +224,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
               ? e.message
               : "无法从服务器加载会话，请确认后端已启动且 API 地址正确"
           );
+          remotePersistenceReadyRef.current = false;
+          stateRevisionRef.current = null;
           const s = createEmptySession();
           setSessions([s]);
           setActiveSessionId(s.id);
@@ -232,6 +246,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     if (!sessionsReady || activeSessionId === null || sessions.length === 0) {
       return;
     }
+    if (!remotePersistenceReadyRef.current) {
+      return;
+    }
     if (!sessions.some((s) => s.id === activeSessionId)) {
       return;
     }
@@ -242,13 +259,25 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
     persistTimerRef.current = setTimeout(() => {
       persistTimerRef.current = null;
-      void putChatSessionsState({
-        version: CHAT_SESSIONS_VERSION,
-        activeSessionId,
-        sessions,
-      }).catch((err) => {
-        console.error("chat sessions persist", err);
-      });
+      void putChatSessionsState(
+        {
+          version: CHAT_SESSIONS_VERSION,
+          activeSessionId,
+          sessions,
+        },
+        stateRevisionRef.current
+      )
+        .then((saved) => {
+          stateRevisionRef.current = saved.stateRevision;
+        })
+        .catch((err) => {
+          console.error("chat sessions persist", err);
+          setError(
+            err instanceof Error
+              ? err.message
+              : "保存会话失败，请刷新后重试"
+          );
+        });
     }, 450);
     return () => {
       if (persistTimerRef.current) {
@@ -396,6 +425,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
       const ws = new WebSocket(wsUrl());
       wsRef.current = ws;
+      let closeExpected = false;
 
       ws.onopen = () => {
         setStatus("streaming");
@@ -631,6 +661,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           setThinkingBuffer("");
           setStreamingCitations([]);
           setStatus("done");
+          closeExpected = true;
           ws.close();
           return;
         }
@@ -644,6 +675,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             "unknown error";
           setError(msg);
           setStatus("error");
+          closeExpected = true;
           ws.close();
         }
       };
@@ -654,10 +686,18 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         setStreamingCitations([]);
         setError("WebSocket error");
         setStatus("error");
+        closeExpected = true;
       };
 
       ws.onclose = () => {
+        if (wsRef.current !== ws) return;
         wsRef.current = null;
+        if (closeExpected) return;
+        streamingSessionIdRef.current = null;
+        activeRequestIdRef.current = null;
+        setStreamingCitations([]);
+        setError("WebSocket connection closed unexpectedly");
+        setStatus("error");
       };
     },
     [appendTrace]
