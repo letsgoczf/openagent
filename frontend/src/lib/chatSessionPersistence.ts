@@ -21,6 +21,7 @@ export interface ChatSessionsFile {
   version: number;
   activeSessionId: string;
   sessions: ChatSessionPersisted[];
+  stateRevision?: number;
 }
 
 function newSessionId(): string {
