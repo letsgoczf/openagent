@@ -9,11 +9,15 @@ export async function fetchChatSessionsState(): Promise<ChatSessionsFile> {
   return r.json() as Promise<ChatSessionsFile>;
 }
 
-export async function putChatSessionsState(body: ChatSessionsFile): Promise<void> {
+export async function putChatSessionsState(
+  body: ChatSessionsFile,
+  options?: { keepalive?: boolean }
+): Promise<void> {
   const r = await fetch(`${apiBase()}/v1/chat-sessions/state`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    keepalive: options?.keepalive,
   });
   if (!r.ok) {
     const t = await r.text().catch(() => "");
