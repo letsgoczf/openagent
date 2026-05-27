@@ -23,6 +23,11 @@ export interface ChatSessionsFile {
   sessions: ChatSessionPersisted[];
 }
 
+export interface ChatSessionsMergeResult {
+  file: ChatSessionsFile;
+  changed: boolean;
+}
+
 function newSessionId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return `s_${crypto.randomUUID()}`;
@@ -96,6 +101,74 @@ export function saveChatSessionsFile(data: ChatSessionsFile): void {
   } catch {
     /* quota or private mode */
   }
+}
+
+export function chatSessionHasUserData(session: ChatSessionPersisted): boolean {
+  return (
+    session.messages.length > 0 ||
+    session.lastEvidenceEntries.length > 0 ||
+    session.lastCitations.length > 0
+  );
+}
+
+function chooseSession(
+  remote: ChatSessionPersisted,
+  legacy: ChatSessionPersisted
+): ChatSessionPersisted {
+  const remoteHasData = chatSessionHasUserData(remote);
+  const legacyHasData = chatSessionHasUserData(legacy);
+  if (legacyHasData && !remoteHasData) return legacy;
+  if (remoteHasData && !legacyHasData) return remote;
+  return legacy.updatedAt > remote.updatedAt ? legacy : remote;
+}
+
+export function mergeChatSessionFiles(
+  remote: ChatSessionsFile,
+  legacy: ChatSessionsFile | null
+): ChatSessionsMergeResult {
+  if (!legacy || legacy.sessions.length === 0) {
+    return { file: remote, changed: false };
+  }
+
+  let changed = false;
+  const legacyById = new Map(legacy.sessions.map((s) => [s.id, s]));
+  const merged: ChatSessionPersisted[] = remote.sessions.map((remoteSession) => {
+    const legacySession = legacyById.get(remoteSession.id);
+    if (!legacySession) return remoteSession;
+    const chosen = chooseSession(remoteSession, legacySession);
+    if (chosen !== remoteSession) changed = true;
+    legacyById.delete(remoteSession.id);
+    return chosen;
+  });
+
+  const remainingLegacy = [...legacyById.values()].sort(
+    (a, b) => b.updatedAt - a.updatedAt
+  );
+  if (remainingLegacy.length > 0) {
+    changed = true;
+    merged.push(...remainingLegacy);
+  }
+
+  if (merged.length === 0) {
+    return { file: remote, changed };
+  }
+
+  const activeOk = merged.some((s) => s.id === remote.activeSessionId);
+  let activeSessionId = activeOk ? remote.activeSessionId : merged[0]!.id;
+  const legacyActive = merged.find((s) => s.id === legacy.activeSessionId);
+  if (legacyActive && chatSessionHasUserData(legacyActive)) {
+    activeSessionId = legacyActive.id;
+  }
+  if (activeSessionId !== remote.activeSessionId) changed = true;
+
+  return {
+    file: {
+      version: CHAT_SESSIONS_VERSION,
+      activeSessionId,
+      sessions: merged,
+    },
+    changed,
+  };
 }
 
 /** 迁移到服务端 DB 后清除旧版 localStorage，避免两套数据源混淆 */

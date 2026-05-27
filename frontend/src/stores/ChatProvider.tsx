@@ -21,6 +21,9 @@ import {
   clearLegacyChatSessionsStorage,
   createEmptySession,
   loadChatSessionsFile,
+  mergeChatSessionFiles,
+  saveChatSessionsFile,
+  type ChatSessionsFile,
   type ChatSessionPersisted,
 } from "@/lib/chatSessionPersistence";
 import {
@@ -163,32 +166,124 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const activeRequestIdRef = useRef<string | null>(null);
   const persistSkipRef = useRef(true);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingPersistRef = useRef<ChatSessionsFile | null>(null);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
 
+  const reportPersistError = useCallback((err: unknown) => {
+    const message =
+      err instanceof Error ? err.message : "保存会话失败，请稍后重试";
+    setError(message);
+  }, []);
+
+  const persistSnapshot = useCallback(
+    async (
+      snapshot: ChatSessionsFile,
+      options?: { keepalive?: boolean; localBackup?: boolean }
+    ) => {
+      if (options?.localBackup) {
+        saveChatSessionsFile(snapshot);
+      }
+      try {
+        await putChatSessionsState(snapshot, { keepalive: options?.keepalive });
+        if (pendingPersistRef.current === snapshot) {
+          pendingPersistRef.current = null;
+        }
+        clearLegacyChatSessionsStorage();
+      } catch (err) {
+        console.error("chat sessions persist", err);
+        if (
+          pendingPersistRef.current === snapshot ||
+          pendingPersistRef.current === null
+        ) {
+          saveChatSessionsFile(snapshot);
+          pendingPersistRef.current = snapshot;
+        }
+        if (!options?.keepalive) {
+          reportPersistError(err);
+        }
+      }
+    },
+    [reportPersistError]
+  );
+
+  const flushPendingPersist = useCallback(
+    (options?: { keepalive?: boolean; localBackup?: boolean }) => {
+      const snapshot = pendingPersistRef.current;
+      if (!snapshot) return;
+      void persistSnapshot(snapshot, options);
+    },
+    [persistSnapshot]
+  );
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const flushForPageExit = () => {
+      flushPendingPersist({ keepalive: true, localBackup: true });
+    };
+    const flushWhenHidden = () => {
+      if (document.visibilityState === "hidden") {
+        flushForPageExit();
+      }
+    };
+    window.addEventListener("pagehide", flushForPageExit);
+    document.addEventListener("visibilitychange", flushWhenHidden);
+    return () => {
+      window.removeEventListener("pagehide", flushForPageExit);
+      document.removeEventListener("visibilitychange", flushWhenHidden);
+      flushForPageExit();
+    };
+  }, [flushPendingPersist]);
+
   useEffect(() => {
     let cancelled = false;
+    let shouldPersistInitialState = false;
     (async () => {
       try {
         const remote = await fetchChatSessionsState();
         if (cancelled) return;
+        const legacy = loadChatSessionsFile();
         if (remote.sessions.length > 0) {
-          const activeOk = remote.sessions.some(
-            (s) => s.id === remote.activeSessionId
-          );
-          setSessions(remote.sessions);
-          setActiveSessionId(
-            activeOk ? remote.activeSessionId! : remote.sessions[0]!.id
-          );
-          clearLegacyChatSessionsStorage();
-        } else {
-          const legacy = loadChatSessionsFile();
-          if (legacy && legacy.sessions.length > 0) {
-            await putChatSessionsState(legacy);
-            if (cancelled) return;
+          const merged = mergeChatSessionFiles(remote, legacy);
+          if (merged.changed) {
+            try {
+              await putChatSessionsState(merged.file);
+              if (cancelled) return;
+              clearLegacyChatSessionsStorage();
+            } catch (err) {
+              if (cancelled) return;
+              console.error("chat sessions migration", err);
+              saveChatSessionsFile(merged.file);
+              pendingPersistRef.current = merged.file;
+              shouldPersistInitialState = true;
+              reportPersistError(err);
+            }
+          } else if (legacy) {
             clearLegacyChatSessionsStorage();
+          }
+          const activeOk = merged.file.sessions.some(
+            (s) => s.id === merged.file.activeSessionId
+          );
+          setSessions(merged.file.sessions);
+          setActiveSessionId(
+            activeOk ? merged.file.activeSessionId : merged.file.sessions[0]!.id
+          );
+        } else {
+          if (legacy && legacy.sessions.length > 0) {
+            try {
+              await putChatSessionsState(legacy);
+              if (cancelled) return;
+              clearLegacyChatSessionsStorage();
+            } catch (err) {
+              if (cancelled) return;
+              console.error("chat sessions migration", err);
+              saveChatSessionsFile(legacy);
+              pendingPersistRef.current = legacy;
+              shouldPersistInitialState = true;
+              reportPersistError(err);
+            }
             setSessions(legacy.sessions);
             setActiveSessionId(legacy.activeSessionId);
           } else {
@@ -212,13 +307,22 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
               ? e.message
               : "无法从服务器加载会话，请确认后端已启动且 API 地址正确"
           );
-          const s = createEmptySession();
-          setSessions([s]);
-          setActiveSessionId(s.id);
+          const legacy = loadChatSessionsFile();
+          if (legacy && legacy.sessions.length > 0) {
+            saveChatSessionsFile(legacy);
+            pendingPersistRef.current = legacy;
+            shouldPersistInitialState = true;
+            setSessions(legacy.sessions);
+            setActiveSessionId(legacy.activeSessionId);
+          } else {
+            const s = createEmptySession();
+            setSessions([s]);
+            setActiveSessionId(s.id);
+          }
         }
       } finally {
         if (!cancelled) {
-          persistSkipRef.current = true;
+          persistSkipRef.current = !shouldPersistInitialState;
           setSessionsReady(true);
         }
       }
@@ -226,7 +330,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reportPersistError]);
 
   useEffect(() => {
     if (!sessionsReady || activeSessionId === null || sessions.length === 0) {
@@ -239,16 +343,16 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       persistSkipRef.current = false;
       return;
     }
+    const snapshot: ChatSessionsFile = {
+      version: CHAT_SESSIONS_VERSION,
+      activeSessionId,
+      sessions,
+    };
+    pendingPersistRef.current = snapshot;
     if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
     persistTimerRef.current = setTimeout(() => {
       persistTimerRef.current = null;
-      void putChatSessionsState({
-        version: CHAT_SESSIONS_VERSION,
-        activeSessionId,
-        sessions,
-      }).catch((err) => {
-        console.error("chat sessions persist", err);
-      });
+      void persistSnapshot(snapshot);
     }, 450);
     return () => {
       if (persistTimerRef.current) {
@@ -256,7 +360,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         persistTimerRef.current = null;
       }
     };
-  }, [sessions, activeSessionId, sessionsReady]);
+  }, [sessions, activeSessionId, sessionsReady, persistSnapshot]);
 
   const sessionView = useMemo(() => {
     const active = sessions.find((s) => s.id === activeSessionId) ?? null;
@@ -657,7 +761,16 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       };
 
       ws.onclose = () => {
-        wsRef.current = null;
+        if (wsRef.current === ws) {
+          wsRef.current = null;
+        }
+        if (activeRequestIdRef.current === clientRequestId) {
+          streamingSessionIdRef.current = null;
+          activeRequestIdRef.current = null;
+          setStreamingCitations([]);
+          setError("WebSocket 连接已断开，请重试。");
+          setStatus("error");
+        }
       };
     },
     [appendTrace]
