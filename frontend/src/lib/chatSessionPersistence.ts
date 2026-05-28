@@ -23,6 +23,11 @@ export interface ChatSessionsFile {
   sessions: ChatSessionPersisted[];
 }
 
+export interface ChatSessionsMergeResult {
+  state: ChatSessionsFile;
+  changed: boolean;
+}
+
 function newSessionId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return `s_${crypto.randomUUID()}`;
@@ -38,6 +43,76 @@ export function createEmptySession(): ChatSessionPersisted {
     messages: [],
     lastEvidenceEntries: [],
     lastCitations: [],
+  };
+}
+
+function hasSessionContent(session: ChatSessionPersisted): boolean {
+  const title = session.title.trim();
+  return (
+    session.messages.length > 0 ||
+    session.lastEvidenceEntries.length > 0 ||
+    session.lastCitations.length > 0 ||
+    (title !== "" && title !== "新会话")
+  );
+}
+
+function preferLegacySession(
+  remote: ChatSessionPersisted,
+  legacy: ChatSessionPersisted
+): boolean {
+  if (!hasSessionContent(legacy)) return false;
+  if (!hasSessionContent(remote)) return true;
+  return legacy.updatedAt > remote.updatedAt;
+}
+
+export function mergeLegacyChatSessions(
+  remote: ChatSessionsFile,
+  legacy: ChatSessionsFile
+): ChatSessionsMergeResult {
+  const byId = new Map<string, ChatSessionPersisted>();
+  let changed = false;
+
+  for (const session of remote.sessions) {
+    byId.set(session.id, session);
+  }
+
+  for (const session of legacy.sessions) {
+    const existing = byId.get(session.id);
+    if (existing) {
+      if (preferLegacySession(existing, session)) {
+        byId.set(session.id, session);
+        changed = true;
+      }
+      continue;
+    }
+    if (!hasSessionContent(session)) continue;
+    byId.set(session.id, session);
+    changed = true;
+  }
+
+  const sessions = [...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+  const legacyActive = sessions.some((s) => s.id === legacy.activeSessionId)
+    ? legacy.sessions.find((s) => s.id === legacy.activeSessionId)
+    : null;
+  const remoteActiveOk = sessions.some((s) => s.id === remote.activeSessionId);
+  const activeSessionId =
+    legacyActive && hasSessionContent(legacyActive)
+      ? legacy.activeSessionId
+      : remoteActiveOk
+        ? remote.activeSessionId
+        : sessions[0]?.id ?? "";
+
+  if (activeSessionId !== remote.activeSessionId) {
+    changed = true;
+  }
+
+  return {
+    state: {
+      version: CHAT_SESSIONS_VERSION,
+      activeSessionId,
+      sessions,
+    },
+    changed,
   };
 }
 
