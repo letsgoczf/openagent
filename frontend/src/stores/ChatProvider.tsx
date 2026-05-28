@@ -234,6 +234,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
               version: CHAT_SESSIONS_VERSION,
               activeSessionId: s.id,
               sessions: initial,
+            };
             setSessions(initial);
             setActiveSessionId(s.id);
             try {
