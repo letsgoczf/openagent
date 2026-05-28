@@ -33,7 +33,7 @@ describe("mergeLegacyChatSessions", () => {
     const remote = baseState("server-empty", [session("server-empty", 20)]);
     const legacy = baseState("legacy-history", [
       session("legacy-history", 10, [
-        { role: "user", content: "important old question" },
+        { id: "m1", role: "user", content: "important old question" },
       ]),
     ]);
 
@@ -50,7 +50,9 @@ describe("mergeLegacyChatSessions", () => {
   it("replaces an empty duplicate server session with legacy content", () => {
     const remote = baseState("same", [session("same", 20)]);
     const legacy = baseState("same", [
-      session("same", 10, [{ role: "assistant", content: "old answer" }]),
+      session("same", 10, [
+        { id: "m2", role: "assistant", content: "old answer" },
+      ]),
     ]);
 
     const result = mergeLegacyChatSessions(remote, legacy);
@@ -58,13 +60,15 @@ describe("mergeLegacyChatSessions", () => {
     expect(result.changed).toBe(true);
     expect(result.state.sessions).toHaveLength(1);
     expect(result.state.sessions[0]!.messages).toEqual([
-      { role: "assistant", content: "old answer" },
+      { id: "m2", role: "assistant", content: "old answer" },
     ]);
   });
 
   it("does not import an empty legacy placeholder over real server state", () => {
     const remote = baseState("remote-history", [
-      session("remote-history", 20, [{ role: "user", content: "new" }]),
+      session("remote-history", 20, [
+        { id: "m3", role: "user", content: "new" },
+      ]),
     ]);
     const legacy = baseState("legacy-empty", [session("legacy-empty", 10)]);
 
