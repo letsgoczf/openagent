@@ -103,6 +103,8 @@ def test_router_meta_tools_question_skips_llm() -> None:
 
 def test_meta_heuristic_not_when_user_asks_uploaded_doc() -> None:
     assert meta_query_skip_retrieval("上传的文档里有哪些工具要求") is False
+    assert meta_query_skip_retrieval("协议里的对接能力是什么") is False
+    assert meta_query_skip_retrieval("合同中的工具要求有哪些") is False
 
 
 def test_meta_heuristic_tools_zh() -> None:

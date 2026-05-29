@@ -21,6 +21,7 @@ import {
   clearLegacyChatSessionsStorage,
   createEmptySession,
   loadChatSessionsFile,
+  saveChatSessionsFile,
   type ChatSessionPersisted,
 } from "@/lib/chatSessionPersistence";
 import {
@@ -192,14 +193,21 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             setSessions(legacy.sessions);
             setActiveSessionId(legacy.activeSessionId);
           } else {
+            const latest = await fetchChatSessionsState().catch(() => null);
+            if (cancelled) return;
+            if (latest && latest.sessions.length > 0) {
+              const activeOk = latest.sessions.some(
+                (s) => s.id === latest.activeSessionId
+              );
+              setSessions(latest.sessions);
+              setActiveSessionId(
+                activeOk ? latest.activeSessionId! : latest.sessions[0]!.id
+              );
+              clearLegacyChatSessionsStorage();
+              return;
+            }
             const s = createEmptySession();
             const initial: ChatSessionPersisted[] = [s];
-            await putChatSessionsState({
-              version: CHAT_SESSIONS_VERSION,
-              activeSessionId: s.id,
-              sessions: initial,
-            });
-            if (cancelled) return;
             setSessions(initial);
             setActiveSessionId(s.id);
           }
@@ -212,9 +220,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
               ? e.message
               : "无法从服务器加载会话，请确认后端已启动且 API 地址正确"
           );
-          const s = createEmptySession();
-          setSessions([s]);
-          setActiveSessionId(s.id);
+          const legacy = loadChatSessionsFile();
+          if (legacy && legacy.sessions.length > 0) {
+            setSessions(legacy.sessions);
+            setActiveSessionId(legacy.activeSessionId);
+          } else {
+            const s = createEmptySession();
+            setSessions([s]);
+            setActiveSessionId(s.id);
+          }
         }
       } finally {
         if (!cancelled) {
@@ -248,6 +262,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         sessions,
       }).catch((err) => {
         console.error("chat sessions persist", err);
+        saveChatSessionsFile({
+          version: CHAT_SESSIONS_VERSION,
+          activeSessionId,
+          sessions,
+        });
       });
     }, 450);
     return () => {
