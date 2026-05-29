@@ -33,6 +33,13 @@ from backend.runners.composer import strip_citations_footer_from_answer
 from backend.storage.qdrant_store import QdrantStore
 
 
+def _should_persist_memory(result: ChatRunResult, assistant_body: str) -> bool:
+    """Only durable, complete assistant turns should become long-term memory."""
+    if not assistant_body.strip():
+        return False
+    return not result.degraded
+
+
 class KernelEngine:
     """
     Kernel 编排：RunContext + Trace + Router stub → ChatRunner + Tool Loop。
@@ -247,45 +254,56 @@ class KernelEngine:
                 )
             if self.settings.memory.enabled:
                 body = strip_citations_footer_from_answer(result.answer)
-                trace.emit(
-                    "memory_write",
-                    {
-                        "session_id": sid,
-                        "user_chars": len(effective_query),
-                        "assistant_chars": len(body),
-                    },
-                )
-                persist_user_assistant_turns(
-                    sqlite,
-                    self.settings.memory,
-                    sid,
-                    result.run_id,
-                    effective_query,
-                    body,
-                    tok,
-                )
-                if self.settings.memory.consolidation_enabled:
-                    run_consolidation_if_needed(
-                        store=sqlite,
-                        cfg=self.settings.memory,
-                        session_id=sid,
-                        budget=bud,
-                        llm=runner.llm_adapter,
-                        tokenizer=tok,
-                        trace=trace,
+                if _should_persist_memory(result, body):
+                    trace.emit(
+                        "memory_write",
+                        {
+                            "session_id": sid,
+                            "user_chars": len(effective_query),
+                            "assistant_chars": len(body),
+                        },
                     )
-                if mem_qdrant is not None:
-                    persist_turn_fragments(
+                    persist_user_assistant_turns(
                         sqlite,
-                        mem_qdrant,
-                        self.settings,
+                        self.settings.memory,
                         sid,
                         result.run_id,
                         effective_query,
                         body,
-                        trace,
-                        budget=bud,
-                        llm=runner.llm_adapter,
+                        tok,
+                    )
+                    if self.settings.memory.consolidation_enabled:
+                        run_consolidation_if_needed(
+                            store=sqlite,
+                            cfg=self.settings.memory,
+                            session_id=sid,
+                            budget=bud,
+                            llm=runner.llm_adapter,
+                            tokenizer=tok,
+                            trace=trace,
+                        )
+                    if mem_qdrant is not None:
+                        persist_turn_fragments(
+                            sqlite,
+                            mem_qdrant,
+                            self.settings,
+                            sid,
+                            result.run_id,
+                            effective_query,
+                            body,
+                            trace,
+                            budget=bud,
+                            llm=runner.llm_adapter,
+                        )
+                else:
+                    trace.emit(
+                        "memory_write_skipped",
+                        {
+                            "session_id": sid,
+                            "degraded": result.degraded,
+                            "degrade_reason": result.degrade_reason,
+                            "assistant_chars": len(body),
+                        },
                     )
         finally:
             qdrant.close()
