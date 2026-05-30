@@ -24,6 +24,7 @@ import {
   type ChatSessionPersisted,
 } from "@/lib/chatSessionPersistence";
 import {
+  ChatSessionsApiError,
   fetchChatSessionsState,
   putChatSessionsState,
 } from "@/lib/chatSessionsApi";
@@ -138,6 +139,21 @@ function normalizeAnswerText(raw: unknown): string {
   return String(raw);
 }
 
+export function mergeChatSessionsOnConflict(
+  remote: ChatSessionPersisted[],
+  local: ChatSessionPersisted[]
+): ChatSessionPersisted[] {
+  const byId = new Map<string, ChatSessionPersisted>();
+  for (const s of remote) byId.set(s.id, s);
+  for (const s of local) {
+    const existing = byId.get(s.id);
+    if (!existing || s.updatedAt > existing.updatedAt) {
+      byId.set(s.id, s);
+    }
+  }
+  return Array.from(byId.values()).sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
 export function ChatProvider({ children }: { children: React.ReactNode }) {
   const [sessions, setSessions] = useState<ChatSessionPersisted[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -163,6 +179,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const activeRequestIdRef = useRef<string | null>(null);
   const persistSkipRef = useRef(true);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stateRevisionRef = useRef<number | null>(null);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -174,6 +191,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       try {
         const remote = await fetchChatSessionsState();
         if (cancelled) return;
+        const remoteRevision =
+          typeof remote.stateRevision === "number" ? remote.stateRevision : 0;
+        stateRevisionRef.current = remoteRevision;
         if (remote.sessions.length > 0) {
           const activeOk = remote.sessions.some(
             (s) => s.id === remote.activeSessionId
@@ -186,20 +206,26 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         } else {
           const legacy = loadChatSessionsFile();
           if (legacy && legacy.sessions.length > 0) {
-            await putChatSessionsState(legacy);
+            const nextRevision = await putChatSessionsState({
+              ...legacy,
+              baseRevision: remoteRevision,
+            });
             if (cancelled) return;
+            stateRevisionRef.current = nextRevision ?? remoteRevision;
             clearLegacyChatSessionsStorage();
             setSessions(legacy.sessions);
             setActiveSessionId(legacy.activeSessionId);
           } else {
             const s = createEmptySession();
             const initial: ChatSessionPersisted[] = [s];
-            await putChatSessionsState({
+            const nextRevision = await putChatSessionsState({
               version: CHAT_SESSIONS_VERSION,
               activeSessionId: s.id,
+              baseRevision: remoteRevision,
               sessions: initial,
             });
             if (cancelled) return;
+            stateRevisionRef.current = nextRevision ?? remoteRevision;
             setSessions(initial);
             setActiveSessionId(s.id);
           }
@@ -212,6 +238,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
               ? e.message
               : "无法从服务器加载会话，请确认后端已启动且 API 地址正确"
           );
+          stateRevisionRef.current = null;
           const s = createEmptySession();
           setSessions([s]);
           setActiveSessionId(s.id);
@@ -245,10 +272,42 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       void putChatSessionsState({
         version: CHAT_SESSIONS_VERSION,
         activeSessionId,
+        baseRevision: stateRevisionRef.current ?? undefined,
         sessions,
-      }).catch((err) => {
-        console.error("chat sessions persist", err);
-      });
+      })
+        .then((nextRevision) => {
+          if (typeof nextRevision === "number") {
+            stateRevisionRef.current = nextRevision;
+          }
+        })
+        .catch(async (err) => {
+          console.error("chat sessions persist", err);
+          if (err instanceof ChatSessionsApiError && err.status === 409) {
+            try {
+              const remote = await fetchChatSessionsState();
+              const remoteRevision =
+                typeof remote.stateRevision === "number"
+                  ? remote.stateRevision
+                  : err.currentRevision;
+              stateRevisionRef.current = remoteRevision;
+              const merged = mergeChatSessionsOnConflict(
+                remote.sessions,
+                sessions
+              );
+              const activeOk = merged.some((s) => s.id === activeSessionId);
+              setError("会话已在其他窗口更新，已合并本地更改。");
+              setSessions(merged);
+              setActiveSessionId(
+                activeOk
+                  ? activeSessionId
+                  : remote.activeSessionId || merged[0]?.id || null
+              );
+            } catch (reloadErr) {
+              console.error("chat sessions reload after conflict", reloadErr);
+              setError("会话已在其他窗口更新，请刷新后继续。");
+            }
+          }
+        });
     }, 450);
     return () => {
       if (persistTimerRef.current) {
@@ -657,7 +716,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       };
 
       ws.onclose = () => {
+        if (wsRef.current !== ws) return;
+        const wasActive = activeRequestIdRef.current === clientRequestId;
         wsRef.current = null;
+        if (!wasActive) return;
+        streamingSessionIdRef.current = null;
+        activeRequestIdRef.current = null;
+        setStreamingCitations([]);
+        setError("WebSocket connection closed");
+        setStatus("error");
       };
     },
     [appendTrace]
