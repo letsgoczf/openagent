@@ -26,6 +26,8 @@ class ChatSessionPersistedDTO(BaseModel):
 class ChatSessionsStateDTO(BaseModel):
     version: Literal[1] = 1
     activeSessionId: str | None = None
+    stateRevision: int | None = None
+    baseRevision: int | None = None
     sessions: list[ChatSessionPersistedDTO]
 
 
@@ -34,10 +36,12 @@ async def get_chat_sessions_state() -> ChatSessionsStateDTO:
     cfg = load_config()
     sqlite = SQLiteStore(cfg.storage.sqlite_path)
     try:
-        active, rows = sqlite.get_ui_chat_state()
+        active, rows, revision = sqlite.get_ui_chat_state()
         return ChatSessionsStateDTO(
             version=1,
             activeSessionId=active,
+            stateRevision=revision,
+            baseRevision=revision,
             sessions=[ChatSessionPersistedDTO.model_validate(s) for s in rows],
         )
     finally:
@@ -45,7 +49,7 @@ async def get_chat_sessions_state() -> ChatSessionsStateDTO:
 
 
 @router.put("/state", response_model=dict)
-async def put_chat_sessions_state(body: ChatSessionsStateDTO) -> dict[str, bool]:
+async def put_chat_sessions_state(body: ChatSessionsStateDTO) -> dict[str, bool | int]:
     if not body.sessions:
         raise ApiException(
             code="chat_sessions.empty",
@@ -70,7 +74,21 @@ async def put_chat_sessions_state(body: ChatSessionsStateDTO) -> dict[str, bool]
     sqlite = SQLiteStore(cfg.storage.sqlite_path)
     try:
         rows = [s.model_dump(mode="json") for s in body.sessions]
-        sqlite.put_ui_chat_state(active_session_id=active, sessions=rows)
-        return {"ok": True}
+        expected = body.baseRevision if body.baseRevision is not None else body.stateRevision
+        try:
+            next_revision = sqlite.put_ui_chat_state(
+                active_session_id=active,
+                sessions=rows,
+                expected_revision=expected,
+            )
+        except ValueError as exc:
+            _, _, current_revision = sqlite.get_ui_chat_state()
+            raise ApiException(
+                code="chat_sessions.conflict",
+                message="chat session state has changed; reload before saving",
+                status_code=409,
+                detail={"currentRevision": current_revision},
+            ) from exc
+        return {"ok": True, "stateRevision": next_revision}
     finally:
         sqlite.close()
