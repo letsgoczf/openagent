@@ -22,3 +22,18 @@ export async function putChatSessionsState(body: ChatSessionsFile): Promise<void
     );
   }
 }
+
+export async function clearChatSessionMemory(sessionId: string): Promise<void> {
+  const sid = sessionId.trim();
+  if (!sid) return;
+  const r = await fetch(
+    `${apiBase()}/v1/chat-sessions/${encodeURIComponent(sid)}/memory`,
+    { method: "DELETE" }
+  );
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    throw new Error(
+      `清除会话记忆失败: HTTP ${r.status}${t ? ` ${t.slice(0, 200)}` : ""}`
+    );
+  }
+}

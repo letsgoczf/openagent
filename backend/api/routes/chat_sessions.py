@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 
 from backend.api.errors import ApiException
 from backend.config_loader import load_config
+from backend.storage.factory import build_qdrant_client
+from backend.storage.qdrant_store import QdrantStore
 from backend.storage.sqlite_store import SQLiteStore
 
 router = APIRouter(prefix="/v1/chat-sessions", tags=["chat-sessions"])
@@ -74,3 +76,51 @@ async def put_chat_sessions_state(body: ChatSessionsStateDTO) -> dict[str, bool]
         return {"ok": True}
     finally:
         sqlite.close()
+
+
+@router.delete("/{session_id}/memory", response_model=dict)
+async def delete_chat_session_memory(session_id: str) -> dict[str, Any]:
+    sid = session_id.strip()
+    if not sid:
+        raise ApiException(
+            code="chat_sessions.bad_session_id",
+            message="session_id must not be empty",
+            status_code=400,
+        )
+
+    cfg = load_config()
+    sqlite = SQLiteStore(cfg.storage.sqlite_path)
+    try:
+        deleted = sqlite.clear_chat_session_memory(sid)
+    finally:
+        sqlite.close()
+
+    vectors_deleted = False
+    vector_delete_error: str | None = None
+    if deleted["fragments"] > 0:
+        qclient = None
+        qdrant = None
+        try:
+            qclient = build_qdrant_client(cfg.storage.qdrant)
+            qdrant = QdrantStore(
+                cfg.storage.qdrant.memory_collection_name,
+                vector_size=cfg.models.embedding.vector_dimensions or 1,
+                client=qclient,
+                owns_client=True,
+            )
+            qdrant.delete_memory_fragments_by_session_id(sid)
+            vectors_deleted = True
+        except Exception as e:  # noqa: BLE001
+            # SQLite rows are authoritative for reconstruction; orphan vectors cannot be read back.
+            vector_delete_error = str(e)
+        finally:
+            if qdrant is not None:
+                qdrant.close()
+
+    return {
+        "ok": True,
+        "session_id": sid,
+        "deleted": deleted,
+        "memory_vectors_deleted": vectors_deleted,
+        "memory_vector_delete_error": vector_delete_error,
+    }
