@@ -25,6 +25,7 @@ class QdrantStore:
         client: QdrantClient | None = None,
         *,
         location: str | None = None,
+        owns_client: bool | None = None,
     ) -> None:
         self.collection_name = collection_name
         self.vector_size = vector_size
@@ -34,7 +35,7 @@ class QdrantStore:
             self._client = QdrantClient(location=location)
         else:
             self._client = QdrantClient(location=":memory:")
-        self._owns_client = client is None
+        self._owns_client = (client is None) if owns_client is None else owns_client
 
     @property
     def client(self) -> QdrantClient:
@@ -189,6 +190,19 @@ class QdrantStore:
                 must=[
                     FieldCondition(key="version_id", match=MatchAny(any=version_ids)),
                 ]
+            ),
+        )
+
+    def delete_memory_fragments_by_session_id(self, session_id: str) -> None:
+        sid = session_id.strip()
+        if not sid:
+            return
+        if not self._client.collection_exists(self.collection_name):
+            return
+        self._client.delete(
+            collection_name=self.collection_name,
+            points_selector=Filter(
+                must=[FieldCondition(key="session_id", match=MatchValue(value=sid))]
             ),
         )
 

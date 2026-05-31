@@ -463,6 +463,7 @@ def build_chat_runner(
         cfg.storage.qdrant.collection_name,
         vector_size=dim,
         client=qclient,
+        owns_client=True,
     )
     llm = create_llm_adapter(cfg)
     tok = create_tokenizer_service(cfg)

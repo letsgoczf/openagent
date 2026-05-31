@@ -464,6 +464,32 @@ class SQLiteStore:
         ).fetchone()
         return dict(row) if row else None
 
+    def clear_chat_session_memory(self, session_id: str) -> dict[str, int]:
+        """Delete all server-side conversational memory for one UI chat session."""
+        sid = session_id.strip()
+        if not sid:
+            return {"turns": 0, "summaries": 0, "fragments": 0}
+        self._conn.execute("BEGIN")
+        try:
+            turns = self._conn.execute(
+                "DELETE FROM chat_session_turn WHERE session_id = ?", (sid,)
+            ).rowcount
+            summaries = self._conn.execute(
+                "DELETE FROM chat_session_summary WHERE session_id = ?", (sid,)
+            ).rowcount
+            fragments = self._conn.execute(
+                "DELETE FROM memory_fragment WHERE session_id = ?", (sid,)
+            ).rowcount
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        return {
+            "turns": max(turns, 0),
+            "summaries": max(summaries, 0),
+            "fragments": max(fragments, 0),
+        }
+
     def upsert_chat_session_summary(
         self,
         session_id: str,

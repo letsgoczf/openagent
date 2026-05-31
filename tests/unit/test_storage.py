@@ -139,6 +139,22 @@ def test_qdrant_delete_by_version_ids() -> None:
     store.close()
 
 
+def test_qdrant_delete_memory_fragments_by_session_id() -> None:
+    store = QdrantStore("mem", vector_size=3, location=":memory:")
+    store.ensure_collection()
+    vec = [0.0, 1.0, 0.0]
+    store.upsert_memory_fragment(vec, fragment_id="f_drop", session_id="s_drop")
+    store.upsert_memory_fragment(vec, fragment_id="f_keep", session_id="s_keep")
+
+    store.delete_memory_fragments_by_session_id("s_drop")
+
+    dropped = store.search_memory_fragments(vec, session_id="s_drop", limit=5)
+    kept = store.search_memory_fragments(vec, session_id="s_keep", limit=5)
+    assert not any(r.get("fragment_id") == "f_drop" for r in dropped)
+    assert any(r.get("fragment_id") == "f_keep" for r in kept)
+    store.close()
+
+
 def test_ui_chat_state_roundtrip(sqlite_db: SQLiteStore) -> None:
     active, sessions = sqlite_db.get_ui_chat_state()
     assert active is None
@@ -163,3 +179,23 @@ def test_ui_chat_state_roundtrip(sqlite_db: SQLiteStore) -> None:
     assert rows[0]["title"] == "hi"
     assert rows[0]["updatedAt"] == 42
     assert rows[0]["messages"][0]["content"] == "x"
+
+
+def test_clear_chat_session_memory_removes_only_target_session(
+    sqlite_db: SQLiteStore,
+) -> None:
+    sqlite_db.append_chat_session_turn("s_drop", "r1", "user", "secret", 1)
+    sqlite_db.append_chat_session_turn("s_drop", "r1", "assistant", "answer", 1)
+    sqlite_db.upsert_chat_session_summary("s_drop", "secret summary", covers_until_id=1)
+    sqlite_db.insert_memory_fragment("f_drop", "s_drop", "r1", "episodic", "secret")
+    sqlite_db.append_chat_session_turn("s_keep", "r2", "user", "keep", 1)
+    sqlite_db.insert_memory_fragment("f_keep", "s_keep", "r2", "episodic", "keep")
+
+    deleted = sqlite_db.clear_chat_session_memory("s_drop")
+
+    assert deleted == {"turns": 2, "summaries": 1, "fragments": 1}
+    assert sqlite_db.fetch_chat_session_turns_recent("s_drop", 10) == []
+    assert sqlite_db.get_chat_session_summary("s_drop") is None
+    assert sqlite_db.get_memory_fragment("f_drop") is None
+    assert len(sqlite_db.fetch_chat_session_turns_recent("s_keep", 10)) == 1
+    assert sqlite_db.get_memory_fragment("f_keep") is not None

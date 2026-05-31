@@ -24,6 +24,7 @@ import {
   type ChatSessionPersisted,
 } from "@/lib/chatSessionPersistence";
 import {
+  clearChatSessionMemory,
   fetchChatSessionsState,
   putChatSessionsState,
 } from "@/lib/chatSessionsApi";
@@ -157,12 +158,17 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const wsRef = useRef<WebSocket | null>(null);
   const thinkingRef = useRef("");
   const assistantRef = useRef("");
+  const sessionsRef = useRef<ChatSessionPersisted[]>([]);
   const activeSessionIdRef = useRef<string | null>(null);
   const streamingSessionIdRef = useRef<string | null>(null);
   /** 与当前 WebSocket 轮次对齐，丢弃旧连接晚到的 chat.* 事件，避免污染新会话侧栏 */
   const activeRequestIdRef = useRef<string | null>(null);
   const persistSkipRef = useRef(true);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -284,6 +290,30 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     setActiveChunkId(null);
   }, []);
 
+  const persistSessionsNow = useCallback(
+    (nextActiveSessionId: string | null, nextSessions: ChatSessionPersisted[]) => {
+      if (
+        !nextActiveSessionId ||
+        nextSessions.length === 0 ||
+        !nextSessions.some((s) => s.id === nextActiveSessionId)
+      ) {
+        return;
+      }
+      if (persistTimerRef.current) {
+        clearTimeout(persistTimerRef.current);
+        persistTimerRef.current = null;
+      }
+      void putChatSessionsState({
+        version: CHAT_SESSIONS_VERSION,
+        activeSessionId: nextActiveSessionId,
+        sessions: nextSessions,
+      }).catch((err) => {
+        console.error("chat sessions persist", err);
+      });
+    },
+    []
+  );
+
   useEffect(() => {
     if (!sessionsReady || sessions.length === 0) return;
     const valid =
@@ -303,7 +333,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     activeSessionIdRef.current = s.id;
     streamingSessionIdRef.current = null;
     activeRequestIdRef.current = null;
-    setSessions((prev) => [s, ...prev]);
+    setSessions((prev) => {
+      const next = [s, ...prev];
+      sessionsRef.current = next;
+      return next;
+    });
     setActiveSessionId(s.id);
     resetEphemeral();
     setStatus("idle");
@@ -326,14 +360,30 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const deleteSession = useCallback(
     (id: string) => {
       if (status === "connecting" || status === "streaming") return;
-      setSessions((prev) => {
-        if (prev.length <= 1) {
-          return [createEmptySession()];
-        }
-        return prev.filter((s) => s.id !== id);
-      });
+      const current = sessionsRef.current;
+      const exists = current.some((s) => s.id === id);
+      if (!exists) return;
+      const next =
+        current.length <= 1
+          ? [createEmptySession()]
+          : current.filter((s) => s.id !== id);
+      const currentActive = activeSessionIdRef.current;
+      const nextActive = next.some((s) => s.id === currentActive)
+        ? currentActive
+        : next[0]!.id;
+      sessionsRef.current = next;
+      activeSessionIdRef.current = nextActive;
+      streamingSessionIdRef.current = null;
+      activeRequestIdRef.current = null;
+      setSessions(next);
+      setActiveSessionId(nextActive);
+      if (nextActive !== currentActive) {
+        resetEphemeral();
+        setStatus("idle");
+      }
+      persistSessionsNow(nextActive, next);
     },
-    [status]
+    [persistSessionsNow, resetEphemeral, status]
   );
 
   const appendTrace = useCallback((type: string, detail: string) => {
@@ -610,8 +660,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           };
 
           if (streamSid) {
-            setSessions((prev) =>
-              prev.map((s) =>
+            setSessions((prev) => {
+              const next = prev.map((s) =>
                 s.id === streamSid
                   ? {
                       ...s,
@@ -621,8 +671,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                       lastCitations: citations,
                     }
                   : s
-              )
-            );
+              );
+              sessionsRef.current = next;
+              persistSessionsNow(activeSessionIdRef.current ?? streamSid, next);
+              return next;
+            });
           }
 
           assistantRef.current = "";
@@ -660,7 +713,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         wsRef.current = null;
       };
     },
-    [appendTrace]
+    [appendTrace, persistSessionsNow]
   );
 
   const stopGeneration = useCallback(() => {
@@ -693,7 +746,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   }, [resetEphemeral]);
 
   const clearMessages = useCallback(() => {
-    const sid = activeSessionId;
+    const sid = activeSessionIdRef.current;
     if (!sid) return;
     const w = wsRef.current;
     if (w) {
@@ -706,23 +759,21 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     }
     streamingSessionIdRef.current = null;
     activeRequestIdRef.current = null;
-    setSessions((prev) =>
-      prev.map((s) =>
-        s.id === sid
-          ? {
-              ...s,
-              title: "新会话",
-              messages: [],
-              lastEvidenceEntries: [],
-              lastCitations: [],
-              updatedAt: Date.now(),
-            }
-          : s
-      )
-    );
+    const replacement = createEmptySession();
+    const current = sessionsRef.current;
+    const next = current.map((s) => (s.id === sid ? replacement : s));
+    if (!next.some((s) => s.id === replacement.id)) return;
+    sessionsRef.current = next;
+    activeSessionIdRef.current = replacement.id;
+    setSessions(next);
+    setActiveSessionId(replacement.id);
+    void clearChatSessionMemory(sid).catch((err) => {
+      console.error("clear chat session memory", err);
+    });
+    persistSessionsNow(replacement.id, next);
     resetEphemeral();
     setStatus("idle");
-  }, [activeSessionId, resetEphemeral]);
+  }, [persistSessionsNow, resetEphemeral]);
 
   const value = useMemo(
     () => ({
