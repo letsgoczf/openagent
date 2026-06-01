@@ -103,6 +103,9 @@ def test_router_meta_tools_question_skips_llm() -> None:
 
 def test_meta_heuristic_not_when_user_asks_uploaded_doc() -> None:
     assert meta_query_skip_retrieval("上传的文档里有哪些工具要求") is False
+    assert meta_query_skip_retrieval("手册里对工具有哪些要求") is False
+    assert meta_query_skip_retrieval("公司政策中有哪些插件审批要求") is False
+    assert meta_query_skip_retrieval("Which tools are required by the handbook?") is False
 
 
 def test_meta_heuristic_tools_zh() -> None:

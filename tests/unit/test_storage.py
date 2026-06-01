@@ -139,6 +139,38 @@ def test_qdrant_delete_by_version_ids() -> None:
     store.close()
 
 
+def test_qdrant_store_closes_owned_provided_client() -> None:
+    class DummyClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    client = DummyClient()
+    store = QdrantStore("owned", vector_size=3, client=client, owns_client=True)  # type: ignore[arg-type]
+
+    store.close()
+
+    assert client.closed is True
+
+
+def test_qdrant_store_keeps_shared_provided_client_open() -> None:
+    class DummyClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    client = DummyClient()
+    store = QdrantStore("shared", vector_size=3, client=client)  # type: ignore[arg-type]
+
+    store.close()
+
+    assert client.closed is False
+
+
 def test_ui_chat_state_roundtrip(sqlite_db: SQLiteStore) -> None:
     active, sessions = sqlite_db.get_ui_chat_state()
     assert active is None
