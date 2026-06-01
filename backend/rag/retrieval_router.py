@@ -26,7 +26,9 @@ No markdown fences, no other text."""
 
 # 用户明确在问「上传材料里的 …」时不要短路跳过
 _DOC_SCOPE_HINT = re.compile(
-    r"(文档|文件|上传|材料|附件|pdf|资料|知识库|这份|该文件|库里|表里|书中|第\s*\d+\s*(页|章))",
+    r"(文档|文件|上传|材料|附件|pdf|资料|知识库|这份|该文件|库里|表里|书中|手册|规范|制度|政策|条款|说明书|指南|规程|"
+    r"document|file|upload|attachment|knowledge\s*base|manual|handbook|policy|procedure|guideline|specification|terms|clause|section|chapter|"
+    r"第\s*\d+\s*(页|章))",
     re.I,
 )
 
