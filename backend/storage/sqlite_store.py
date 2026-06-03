@@ -322,6 +322,36 @@ class SQLiteStore:
         ).fetchall()
         return [str(r["version_id"]) for r in rows]
 
+    def list_retrievable_version_ids(
+        self,
+        *,
+        version_ids: list[str] | None = None,
+        statuses: tuple[str, ...] = ("ready", "completed"),
+    ) -> list[str]:
+        """Return version ids that are safe for retrieval, preserving optional caller scope."""
+        if not statuses:
+            return []
+        status_ph = ",".join("?" * len(statuses))
+        args: list[Any] = list(statuses)
+        cond_scope = ""
+        if version_ids is not None:
+            if not version_ids:
+                return []
+            scope_ph = ",".join("?" * len(version_ids))
+            cond_scope = f" AND version_id IN ({scope_ph})"
+            args.extend(version_ids)
+
+        rows = self._conn.execute(
+            f"""
+            SELECT version_id
+            FROM document_version
+            WHERE status IN ({status_ph}){cond_scope}
+            ORDER BY rowid ASC
+            """,
+            args,
+        ).fetchall()
+        return [str(r["version_id"]) for r in rows]
+
     def delete_document(self, doc_id: str) -> bool:
         """
         删除 document 及其关联版本/chunk/page_stats（依赖 FK CASCADE）。
