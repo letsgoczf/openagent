@@ -218,6 +218,60 @@ def test_retrieval_candidate_debug_flag(tmp_path) -> None:
     qd.close()
 
 
+def test_retrieval_ignores_failed_document_versions(tmp_path) -> None:
+    db = tmp_path / "status.db"
+    store = SQLiteStore(db)
+    completed_doc, completed_ver = str(uuid.uuid4()), str(uuid.uuid4())
+    failed_doc, failed_ver = str(uuid.uuid4()), str(uuid.uuid4())
+    completed_chunk, failed_chunk = str(uuid.uuid4()), str(uuid.uuid4())
+
+    store.insert_document(completed_doc, "/completed.pdf", "completed.pdf", "pdf")
+    store.insert_document_version(completed_ver, completed_doc, "h1", "ev1", "tok", "completed")
+    store.insert_chunk(
+        completed_chunk,
+        completed_ver,
+        "text",
+        0,
+        "alpha completed source",
+        {"page_number": 1},
+        page_number=1,
+    )
+    store.insert_document(failed_doc, "/failed.pdf", "failed.pdf", "pdf")
+    store.insert_document_version(failed_ver, failed_doc, "h2", "ev1", "tok", "failed")
+    store.insert_chunk(
+        failed_chunk,
+        failed_ver,
+        "text",
+        0,
+        "alpha failed partial source",
+        {"page_number": 2},
+        page_number=2,
+    )
+
+    qd = QdrantStore("status_filter", vector_size=4, location=":memory:")
+    qd.ensure_collection()
+    vec = [1.0, 0.0, 0.0, 0.0]
+    for cid, vid in ((completed_chunk, completed_ver), (failed_chunk, failed_ver)):
+        qd.upsert_embedding(
+            vec,
+            chunk_id=cid,
+            version_id=vid,
+            origin_type="text",
+            unit_type="pdf_page",
+            unit_number=1,
+        )
+
+    svc = RetrievalService(store, qd, TokenizerService(model_id="gpt-4"), settings=_settings())
+    result = svc.retrieve("alpha", vec, top_k_dense=10, top_k_keyword=10, candidate_debug=True)
+
+    assert [entry.chunk_id for entry in result.evidence_entries] == [completed_chunk]
+    assert result.retrieval_state["retrievable_versions"] == 1
+    assert result.candidate_debug is not None
+    assert all(hit.get("chunk_id") != failed_chunk for hit in result.candidate_debug["dense_hits"])
+    store.close()
+    qd.close()
+
+
 def test_truncate_respects_budget() -> None:
     tok = TokenizerService(encoding_name="cl100k_base")
     t = "hello " * 100

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from unittest.mock import Mock
 
 import pytest
 
@@ -137,6 +138,41 @@ def test_qdrant_delete_by_version_ids() -> None:
     assert "c_drop" not in ids
     assert "c_keep" in ids
     store.close()
+
+
+def test_qdrant_store_closes_owned_external_client() -> None:
+    borrowed_client = Mock()
+    borrowed = QdrantStore("borrowed", vector_size=3, client=borrowed_client)
+    borrowed.close()
+    borrowed_client.close.assert_not_called()
+
+    owned_client = Mock()
+    owned = QdrantStore("owned", vector_size=3, client=owned_client, owns_client=True)
+    owned.close()
+    owned_client.close.assert_called_once()
+
+
+def test_list_retrievable_version_ids_filters_failed_versions(sqlite_db: SQLiteStore) -> None:
+    ready_doc, ready_ver, _ = _seed_doc(sqlite_db, "ready body")
+
+    failed_doc = str(uuid.uuid4())
+    failed_ver = str(uuid.uuid4())
+    sqlite_db.insert_document(failed_doc, "/tmp/f.pdf", "f.pdf", "pdf")
+    sqlite_db.insert_document_version(failed_ver, failed_doc, "hash2", "ext-v1", "tok", "failed")
+
+    completed_doc = str(uuid.uuid4())
+    completed_ver = str(uuid.uuid4())
+    sqlite_db.insert_document(completed_doc, "/tmp/c.pdf", "c.pdf", "pdf")
+    sqlite_db.insert_document_version(
+        completed_ver, completed_doc, "hash3", "ext-v1", "tok", "completed"
+    )
+
+    assert sqlite_db.list_retrievable_version_ids() == [ready_ver, completed_ver]
+    assert sqlite_db.list_retrievable_version_ids(version_ids=[failed_ver]) == []
+    assert sqlite_db.list_retrievable_version_ids(
+        version_ids=[failed_ver, completed_ver, ready_ver]
+    ) == [ready_ver, completed_ver]
+    assert sqlite_db.get_document_summary(ready_doc) is not None
 
 
 def test_ui_chat_state_roundtrip(sqlite_db: SQLiteStore) -> None:

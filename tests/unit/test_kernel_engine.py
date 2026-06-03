@@ -115,3 +115,4 @@ def test_engine_trace_events_sequence(
     assert "evidence_update" in types
     assert "completed" in types
     conn.close()
+    mock_qclient.return_value.close.assert_called_once()
