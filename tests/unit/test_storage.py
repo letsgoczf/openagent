@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from backend.api.routes import documents as documents_route
+from backend.config_loader import (
+    EmbeddingConfig,
+    GenerationConfig,
+    ModelsConfig,
+    OpenAgentSettings,
+    StorageConfig,
+)
 from backend.storage.qdrant_store import QdrantStore
 from backend.storage.sqlite_store import SQLiteStore
 
@@ -137,6 +147,50 @@ def test_qdrant_delete_by_version_ids() -> None:
     assert "c_drop" not in ids
     assert "c_keep" in ids
     store.close()
+
+
+def test_document_delete_preserves_sqlite_when_vector_delete_fails(
+    tmp_path,
+) -> None:
+    sqlite_path = tmp_path / "docs.db"
+    sqlite = SQLiteStore(sqlite_path)
+    doc_id, ver_id, _chunk_id = _seed_doc(sqlite, "retry me if vector delete fails")
+    sqlite.close()
+
+    settings = OpenAgentSettings(
+        models=ModelsConfig(
+            generation=GenerationConfig(
+                provider="ollama",
+                model_id="tiny",
+                base_url="http://127.0.0.1:11434",
+            ),
+            embedding=EmbeddingConfig(
+                provider="ollama",
+                model_id="nomic-embed-text",
+                base_url="http://127.0.0.1:11434",
+                vector_dimensions=4,
+            ),
+        ),
+        storage=StorageConfig(sqlite_path=str(sqlite_path)),
+    )
+    qdrant = MagicMock()
+    qdrant.delete_by_version_ids.side_effect = RuntimeError("qdrant unavailable")
+
+    with (
+        patch.object(documents_route, "load_config", return_value=settings),
+        patch.object(documents_route, "_resolve_embedding_dim", return_value=4),
+        patch.object(documents_route, "build_qdrant_client", return_value=MagicMock()),
+        patch.object(documents_route, "QdrantStore", return_value=qdrant),
+    ):
+        with pytest.raises(RuntimeError, match="qdrant unavailable"):
+            asyncio.run(documents_route.delete_document(doc_id))
+
+    verify = SQLiteStore(sqlite_path)
+    try:
+        assert verify.get_document_summary(doc_id) is not None
+        assert verify.list_version_ids_by_doc_id(doc_id) == [ver_id]
+    finally:
+        verify.close()
 
 
 def test_ui_chat_state_roundtrip(sqlite_db: SQLiteStore) -> None:

@@ -6,19 +6,23 @@ from backend.config_loader import (
     EmbeddingConfig,
     EvidenceConfig,
     GenerationConfig,
+    MemoryConfig,
     ModelsConfig,
     OpenAgentSettings,
     RagConfig,
     RagRecallConfig,
     RagRerankConfig,
+    SkillsBundleConfig,
     StorageConfig,
     TokenizationConfig,
 )
 from backend.kernel.budget import Budget
 from backend.kernel.engine import KernelEngine
+from backend.runners.chat_runner import ChatRunResult
 from backend.rag.citation import Citation
 from backend.rag.evidence_builder import EvidenceEntry
 from backend.rag.service import RetrievalResult
+from backend.storage.sqlite_store import SQLiteStore
 
 
 def _settings_simple(tmp_path) -> OpenAgentSettings:
@@ -115,3 +119,49 @@ def test_engine_trace_events_sequence(
     assert "evidence_update" in types
     assert "completed" in types
     conn.close()
+
+
+@patch("backend.kernel.engine.build_chat_runner")
+def test_engine_does_not_persist_cancelled_turn_to_memory(
+    mock_build_runner,
+    tmp_path,
+) -> None:
+    settings = _settings_simple(tmp_path)
+    settings.memory = MemoryConfig(
+        enabled=True,
+        consolidation_enabled=False,
+        fragments_enabled=False,
+        session_max_turns=8,
+        session_max_history_tokens=8000,
+    )
+    settings.skills_bundle = SkillsBundleConfig(enabled=False)
+
+    sqlite = SQLiteStore(settings.storage.sqlite_path)
+    qdrant = MagicMock()
+    runner = MagicMock()
+    runner.llm_adapter = MagicMock()
+    runner.run.return_value = ChatRunResult(
+        answer="partial assistant text",
+        citations=[],
+        evidence_entries=[],
+        degraded=True,
+        run_id="run_cancelled",
+        retrieval_state={},
+        degrade_reason="user_cancelled",
+    )
+    mock_build_runner.return_value = (runner, sqlite, qdrant)
+
+    eng = KernelEngine(settings=settings)
+    out = eng.run_chat(
+        "please stop",
+        session_id="session_cancelled",
+        budget=Budget(max_llm_calls=3),
+    )
+
+    assert out.degrade_reason == "user_cancelled"
+    verify = SQLiteStore(settings.storage.sqlite_path)
+    try:
+        rows = verify.fetch_chat_session_turns_recent("session_cancelled", 10)
+        assert rows == []
+    finally:
+        verify.close()

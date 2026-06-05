@@ -223,8 +223,8 @@ async def delete_document(doc_id: str) -> dict[str, Any]:
                 detail={"doc_id": doc_id},
             )
         version_ids = sqlite.list_version_ids_by_doc_id(doc_id)
-        sqlite.delete_document(doc_id)
         qdrant.delete_by_version_ids(version_ids)
+        sqlite.delete_document(doc_id)
         return {"ok": True, "doc_id": doc_id, "deleted_versions": len(version_ids)}
     finally:
         qdrant.close()
