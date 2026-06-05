@@ -245,7 +245,7 @@ class KernelEngine:
                     rolling_summary=rolling_summary,
                     reconstructed_memory=reconstructed_memory,
                 )
-            if self.settings.memory.enabled:
+            if self.settings.memory.enabled and result.degrade_reason != "user_cancelled":
                 body = strip_citations_footer_from_answer(result.answer)
                 trace.emit(
                     "memory_write",
@@ -287,6 +287,14 @@ class KernelEngine:
                         budget=bud,
                         llm=runner.llm_adapter,
                     )
+            elif self.settings.memory.enabled:
+                trace.emit(
+                    "memory_write_skipped",
+                    {
+                        "session_id": sid,
+                        "reason": result.degrade_reason,
+                    },
+                )
         finally:
             qdrant.close()
             sqlite.close()
