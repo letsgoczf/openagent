@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from unittest.mock import MagicMock, patch
 
@@ -148,8 +149,7 @@ def test_qdrant_delete_by_version_ids() -> None:
     store.close()
 
 
-@pytest.mark.asyncio
-async def test_document_delete_preserves_sqlite_when_vector_delete_fails(
+def test_document_delete_preserves_sqlite_when_vector_delete_fails(
     tmp_path,
 ) -> None:
     sqlite_path = tmp_path / "docs.db"
@@ -183,7 +183,7 @@ async def test_document_delete_preserves_sqlite_when_vector_delete_fails(
         patch.object(documents_route, "QdrantStore", return_value=qdrant),
     ):
         with pytest.raises(RuntimeError, match="qdrant unavailable"):
-            await documents_route.delete_document(doc_id)
+            asyncio.run(documents_route.delete_document(doc_id))
 
     verify = SQLiteStore(sqlite_path)
     try:
