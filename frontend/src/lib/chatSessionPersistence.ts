@@ -23,6 +23,16 @@ export interface ChatSessionsFile {
   sessions: ChatSessionPersisted[];
 }
 
+function sessionPayloadKey(session: ChatSessionPersisted): string {
+  return JSON.stringify({
+    title: session.title,
+    updatedAt: session.updatedAt,
+    messages: session.messages,
+    lastEvidenceEntries: session.lastEvidenceEntries,
+    lastCitations: session.lastCitations,
+  });
+}
+
 function newSessionId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return `s_${crypto.randomUUID()}`;
@@ -96,6 +106,58 @@ export function saveChatSessionsFile(data: ChatSessionsFile): void {
   } catch {
     /* quota or private mode */
   }
+}
+
+export function mergeChatSessionsFile(
+  remote: ChatSessionsFile,
+  legacy: ChatSessionsFile | null
+): { state: ChatSessionsFile; changed: boolean } {
+  if (!legacy || legacy.sessions.length === 0) {
+    return { state: remote, changed: false };
+  }
+
+  const byId = new Map<string, ChatSessionPersisted>();
+  for (const session of remote.sessions) {
+    byId.set(session.id, session);
+  }
+
+  let changed = false;
+  for (const session of legacy.sessions) {
+    const current = byId.get(session.id);
+    if (!current) {
+      byId.set(session.id, session);
+      changed = true;
+      continue;
+    }
+    const useLegacy =
+      session.updatedAt > current.updatedAt ||
+      (session.updatedAt === current.updatedAt &&
+        sessionPayloadKey(session) !== sessionPayloadKey(current));
+    if (useLegacy) {
+      byId.set(session.id, session);
+      changed = true;
+    }
+  }
+
+  if (!changed) {
+    return { state: remote, changed: false };
+  }
+
+  const sessions = [...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+  const activeSessionId = sessions.some((s) => s.id === remote.activeSessionId)
+    ? remote.activeSessionId
+    : sessions.some((s) => s.id === legacy.activeSessionId)
+      ? legacy.activeSessionId
+      : sessions[0]!.id;
+
+  return {
+    state: {
+      version: CHAT_SESSIONS_VERSION,
+      activeSessionId,
+      sessions,
+    },
+    changed: true,
+  };
 }
 
 /** 迁移到服务端 DB 后清除旧版 localStorage，避免两套数据源混淆 */

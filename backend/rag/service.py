@@ -85,13 +85,18 @@ class RetrievalService:
         allowed = self._settings.rag.allowed_origin_types
         origin_list = list(allowed) if allowed else None
         origin_frozen = frozenset(allowed) if allowed else None
+        effective_version_scope = (
+            version_scope
+            if version_scope is not None
+            else self._sqlite.list_retrievable_version_ids()
+        )
 
         t0 = time.perf_counter()
         d_hits = dense_recall(
             self._qdrant,
             query_vector,
             top_k=tk_d,
-            version_ids=version_scope,
+            version_ids=effective_version_scope,
         )
         t_dense = time.perf_counter()
         kw_error: str | None = None
@@ -100,7 +105,7 @@ class RetrievalService:
                 self._sqlite,
                 query,
                 top_k=tk_k,
-                version_ids=version_scope,
+                version_ids=effective_version_scope,
                 allowed_origin_types=origin_list,
             )
         except Exception as e:  # noqa: BLE001
@@ -156,6 +161,7 @@ class RetrievalService:
                 "w_dense": w_d,
                 "w_keyword": w_k,
             },
+            "version_scope": effective_version_scope,
             "allowed_origin_types": origin_list,
             "rag_views": None,
         }

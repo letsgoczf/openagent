@@ -128,6 +128,8 @@ class SQLiteStore:
         origin_types: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Keyword search over chunk_text; bm25 score (lower is better). Optional version / origin filter."""
+        if version_ids is not None and not version_ids:
+            return []
         cond_version = ""
         cond_origin = ""
         extra_args: list[Any] = []
@@ -319,6 +321,36 @@ class SQLiteStore:
             ORDER BY rowid ASC
             """,
             (doc_id,),
+        ).fetchall()
+        return [str(r["version_id"]) for r in rows]
+
+    def list_retrievable_version_ids(
+        self,
+        *,
+        statuses: tuple[str, ...] = ("completed", "ready"),
+    ) -> list[str]:
+        """Return the latest retrievable version for each document.
+
+        ``ready`` is retained for older databases/tests; newly imported documents
+        use ``completed``. Processing or failed versions must not feed RAG.
+        """
+        if not statuses:
+            return []
+        placeholders = ",".join("?" * len(statuses))
+        rows = self._conn.execute(
+            f"""
+            SELECT v.version_id
+            FROM document_version v
+            WHERE v.status IN ({placeholders})
+              AND v.rowid = (
+                  SELECT MAX(v2.rowid)
+                  FROM document_version v2
+                  WHERE v2.doc_id = v.doc_id
+                    AND v2.status IN ({placeholders})
+              )
+            ORDER BY v.rowid ASC
+            """,
+            (*statuses, *statuses),
         ).fetchall()
         return [str(r["version_id"]) for r in rows]
 
