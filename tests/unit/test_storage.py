@@ -49,12 +49,33 @@ def test_sqlite_fts5_returns_chunk_id(sqlite_db: SQLiteStore) -> None:
     assert any(h["chunk_id"] == chunk_id for h in hits)
 
 
+def test_sqlite_fts5_empty_version_scope_returns_no_hits(sqlite_db: SQLiteStore) -> None:
+    _seed_doc(sqlite_db, "alpha beta gamma uniqueword")
+    hits = sqlite_db.query_fts5("uniqueword", limit=5, version_ids=[])
+    assert hits == []
+
+
 def test_list_document_summaries(sqlite_db: SQLiteStore) -> None:
     _seed_doc(sqlite_db, "doc body")
     rows = sqlite_db.list_document_summaries()
     assert len(rows) == 1
     assert rows[0]["file_name"] == "x.pdf"
     assert rows[0]["version_status"] == "ready"
+
+
+def test_list_retrievable_version_ids_latest_ready_or_completed(
+    sqlite_db: SQLiteStore,
+) -> None:
+    doc_a, old_ready, latest_failed = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+    doc_b, processing, completed = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+    sqlite_db.insert_document(doc_a, "/a", "a.txt", "text/plain")
+    sqlite_db.insert_document_version(old_ready, doc_a, "h1", "ev1", "tok", "ready")
+    sqlite_db.insert_document_version(latest_failed, doc_a, "h2", "ev1", "tok", "failed")
+    sqlite_db.insert_document(doc_b, "/b", "b.txt", "text/plain")
+    sqlite_db.insert_document_version(processing, doc_b, "h3", "ev1", "tok", "processing")
+    sqlite_db.insert_document_version(completed, doc_b, "h4", "ev1", "tok", "completed")
+
+    assert sqlite_db.list_retrievable_version_ids() == [old_ready, completed]
 
 
 def test_sqlite_delete_document_cascade(sqlite_db: SQLiteStore) -> None:
@@ -108,6 +129,23 @@ def test_qdrant_version_filter_excludes() -> None:
     )
     out = store.search(vec, limit=5, version_id="other")
     assert not any(r.get("chunk_id") == "ca" for r in out)
+    store.close()
+
+
+def test_qdrant_empty_version_scope_returns_no_hits() -> None:
+    store = QdrantStore("empty_scope", vector_size=3, location=":memory:")
+    store.ensure_collection()
+    vec = [1.0, 0.0, 0.0]
+    store.upsert_embedding(
+        vec,
+        chunk_id="ca",
+        version_id="v_a",
+        origin_type="text",
+        unit_type="page",
+        unit_number=1,
+    )
+    out = store.search(vec, limit=5, version_ids=[])
+    assert out == []
     store.close()
 
 

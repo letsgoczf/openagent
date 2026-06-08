@@ -218,6 +218,97 @@ def test_retrieval_candidate_debug_flag(tmp_path) -> None:
     qd.close()
 
 
+def test_retrieval_default_scope_excludes_unfinished_versions(tmp_path) -> None:
+    db = tmp_path / "scope.db"
+    store = SQLiteStore(db)
+    qd = QdrantStore("scope_chunks", vector_size=4, location=":memory:")
+    qd.ensure_collection()
+    tok = TokenizerService(model_id="gpt-4")
+
+    completed_doc, completed_ver = str(uuid.uuid4()), str(uuid.uuid4())
+    failed_doc, failed_ver = str(uuid.uuid4()), str(uuid.uuid4())
+    processing_doc, processing_ver = str(uuid.uuid4()), str(uuid.uuid4())
+    completed_cid, failed_cid, processing_cid = (
+        str(uuid.uuid4()),
+        str(uuid.uuid4()),
+        str(uuid.uuid4()),
+    )
+
+    for doc_id, ver_id, cid, status, text in [
+        (completed_doc, completed_ver, completed_cid, "completed", "alpha completed source"),
+        (failed_doc, failed_ver, failed_cid, "failed", "alpha failed source"),
+        (processing_doc, processing_ver, processing_cid, "processing", "alpha processing source"),
+    ]:
+        store.insert_document(doc_id, f"/{doc_id}", f"{doc_id}.txt", "text/plain")
+        store.insert_document_version(ver_id, doc_id, "h", "ev1", "tok", status)
+        store.insert_chunk(cid, ver_id, "text", 0, text, {"unit_index": 1})
+        qd.upsert_embedding(
+            [1.0, 0.0, 0.0, 0.0],
+            chunk_id=cid,
+            version_id=ver_id,
+            origin_type="text",
+            unit_type="unit",
+            unit_number=1,
+        )
+
+    svc = RetrievalService(store, qd, tok, settings=_settings())
+    result = svc.retrieve(
+        "alpha source",
+        [1.0, 0.0, 0.0, 0.0],
+        top_k_dense=10,
+        top_k_keyword=10,
+        rerank_top_n=10,
+        candidate_debug=True,
+    )
+
+    ids = {entry.chunk_id for entry in result.evidence_entries}
+    assert completed_cid in ids
+    assert failed_cid not in ids
+    assert processing_cid not in ids
+    assert result.retrieval_state["version_scope"] == [completed_ver]
+
+    store.close()
+    qd.close()
+
+
+def test_retrieval_default_scope_empty_when_no_retrievable_versions(tmp_path) -> None:
+    db = tmp_path / "no_scope.db"
+    store = SQLiteStore(db)
+    qd = QdrantStore("no_scope_chunks", vector_size=4, location=":memory:")
+    qd.ensure_collection()
+    tok = TokenizerService(model_id="gpt-4")
+
+    doc_id, ver_id, cid = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+    store.insert_document(doc_id, "/failed", "failed.txt", "text/plain")
+    store.insert_document_version(ver_id, doc_id, "h", "ev1", "tok", "failed")
+    store.insert_chunk(cid, ver_id, "text", 0, "alpha failed source", {"unit_index": 1})
+    qd.upsert_embedding(
+        [1.0, 0.0, 0.0, 0.0],
+        chunk_id=cid,
+        version_id=ver_id,
+        origin_type="text",
+        unit_type="unit",
+        unit_number=1,
+    )
+
+    svc = RetrievalService(store, qd, tok, settings=_settings())
+    result = svc.retrieve(
+        "alpha source",
+        [1.0, 0.0, 0.0, 0.0],
+        top_k_dense=10,
+        top_k_keyword=10,
+        rerank_top_n=10,
+        candidate_debug=True,
+    )
+
+    assert result.evidence_entries == []
+    assert result.citations == []
+    assert result.retrieval_state["version_scope"] == []
+
+    store.close()
+    qd.close()
+
+
 def test_truncate_respects_budget() -> None:
     tok = TokenizerService(encoding_name="cl100k_base")
     t = "hello " * 100

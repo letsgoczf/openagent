@@ -89,6 +89,8 @@ class QdrantStore:
         version_id: str | None = None,
         version_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
+        if version_ids is not None and not version_ids:
+            return []
         self.ensure_collection()
         qf = None
         if version_ids:

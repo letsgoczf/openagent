@@ -21,6 +21,7 @@ import {
   clearLegacyChatSessionsStorage,
   createEmptySession,
   loadChatSessionsFile,
+  mergeChatSessionsFile,
   type ChatSessionPersisted,
 } from "@/lib/chatSessionPersistence";
 import {
@@ -161,6 +162,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const streamingSessionIdRef = useRef<string | null>(null);
   /** 与当前 WebSocket 轮次对齐，丢弃旧连接晚到的 chat.* 事件，避免污染新会话侧栏 */
   const activeRequestIdRef = useRef<string | null>(null);
+  const persistEnabledRef = useRef(false);
   const persistSkipRef = useRef(true);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -175,12 +177,21 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         const remote = await fetchChatSessionsState();
         if (cancelled) return;
         if (remote.sessions.length > 0) {
-          const activeOk = remote.sessions.some(
-            (s) => s.id === remote.activeSessionId
+          const { state, changed } = mergeChatSessionsFile(
+            remote,
+            loadChatSessionsFile()
           );
-          setSessions(remote.sessions);
+          if (changed) {
+            await putChatSessionsState(state);
+            if (cancelled) return;
+          }
+          const activeOk = state.sessions.some(
+            (s) => s.id === state.activeSessionId
+          );
+          persistEnabledRef.current = true;
+          setSessions(state.sessions);
           setActiveSessionId(
-            activeOk ? remote.activeSessionId! : remote.sessions[0]!.id
+            activeOk ? state.activeSessionId : state.sessions[0]!.id
           );
           clearLegacyChatSessionsStorage();
         } else {
@@ -188,6 +199,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           if (legacy && legacy.sessions.length > 0) {
             await putChatSessionsState(legacy);
             if (cancelled) return;
+            persistEnabledRef.current = true;
             clearLegacyChatSessionsStorage();
             setSessions(legacy.sessions);
             setActiveSessionId(legacy.activeSessionId);
@@ -200,6 +212,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
               sessions: initial,
             });
             if (cancelled) return;
+            persistEnabledRef.current = true;
             setSessions(initial);
             setActiveSessionId(s.id);
           }
@@ -212,6 +225,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
               ? e.message
               : "无法从服务器加载会话，请确认后端已启动且 API 地址正确"
           );
+          persistEnabledRef.current = false;
           const s = createEmptySession();
           setSessions([s]);
           setActiveSessionId(s.id);
@@ -230,6 +244,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!sessionsReady || activeSessionId === null || sessions.length === 0) {
+      return;
+    }
+    if (!persistEnabledRef.current) {
       return;
     }
     if (!sessions.some((s) => s.id === activeSessionId)) {
