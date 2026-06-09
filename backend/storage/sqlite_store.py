@@ -8,6 +8,20 @@ from typing import Any
 from backend.storage.schema import apply_schema
 
 
+UI_CHAT_STATE_REVISION_KEY = "ui_chat_state_revision"
+
+
+class UIChatStateConflictError(Exception):
+    """Raised when a full UI chat-state write is based on a stale revision."""
+
+    def __init__(self, *, current_revision: int, expected_revision: int) -> None:
+        super().__init__(
+            f"stale UI chat state revision {expected_revision}; current is {current_revision}"
+        )
+        self.current_revision = current_revision
+        self.expected_revision = expected_revision
+
+
 class SQLiteStore:
     """SQLite persistence for documents, chunks (with FTS5), page_stats, trace_event."""
 
@@ -518,15 +532,34 @@ class SQLiteStore:
             )
         return active, sessions
 
+    def get_ui_chat_state_revision(self) -> int:
+        row = self._conn.execute(
+            "SELECT value FROM ui_preferences WHERE key = ?",
+            (UI_CHAT_STATE_REVISION_KEY,),
+        ).fetchone()
+        if not row:
+            return 0
+        try:
+            return int(row["value"] or 0)
+        except (TypeError, ValueError):
+            return 0
+
     def put_ui_chat_state(
         self,
         *,
         active_session_id: str | None,
         sessions: list[dict[str, Any]],
-    ) -> None:
-        """全量替换 UI 会话表（单用户；事务）。"""
-        self._conn.execute("BEGIN")
+        base_revision: int | None = None,
+    ) -> int:
+        """全量替换 UI 会话表（单用户；事务），用 revision 防止旧快照覆盖新数据。"""
+        self._conn.execute("BEGIN IMMEDIATE")
         try:
+            current_revision = self.get_ui_chat_state_revision()
+            if base_revision is not None and base_revision != current_revision:
+                raise UIChatStateConflictError(
+                    current_revision=current_revision,
+                    expected_revision=base_revision,
+                )
             self._conn.execute("DELETE FROM ui_chat_session")
             for s in sessions:
                 sid = str(s.get("id") or "").strip()
@@ -553,7 +586,16 @@ class SQLiteStore:
                 """,
                 ("active_chat_session_id", active_session_id or ""),
             )
+            next_revision = current_revision + 1
+            self._conn.execute(
+                """
+                INSERT INTO ui_preferences (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (UI_CHAT_STATE_REVISION_KEY, str(next_revision)),
+            )
             self._conn.commit()
+            return next_revision
         except Exception:
             self._conn.rollback()
             raise

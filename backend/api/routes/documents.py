@@ -22,6 +22,9 @@ from backend.storage.sqlite_store import SQLiteStore
 
 router = APIRouter(prefix="/v1/documents", tags=["documents"])
 
+MAX_DOCUMENT_UPLOAD_BYTES = 50 * 1024 * 1024
+UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
+
 
 def _resolve_embedding_dim(cfg: OpenAgentSettings) -> int:
     dim = cfg.models.embedding.vector_dimensions
@@ -29,6 +32,25 @@ def _resolve_embedding_dim(cfg: OpenAgentSettings) -> int:
         return dim
     # 兜底：探测 embedding 维度（会发起一次 embedding 请求）
     return len(embed_text("ping", settings=cfg))
+
+
+async def _read_upload_file_limited(file: UploadFile) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(UPLOAD_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_DOCUMENT_UPLOAD_BYTES:
+            raise ApiException(
+                code="document.upload_too_large",
+                message="document upload exceeds maximum size",
+                status_code=413,
+                detail={"max_bytes": MAX_DOCUMENT_UPLOAD_BYTES},
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _run_document_import_job(
@@ -181,7 +203,7 @@ def _run_document_import_job(
 
 @router.post("/import", response_model=dict)
 async def import_document(file: UploadFile = File(...)) -> dict[str, Any]:
-    file_bytes = await file.read()
+    file_bytes = await _read_upload_file_limited(file)
     filename = file.filename or "upload.bin"
     file_type = file.content_type or "application/octet-stream"
 

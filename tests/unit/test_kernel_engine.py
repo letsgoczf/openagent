@@ -19,6 +19,8 @@ from backend.kernel.engine import KernelEngine
 from backend.rag.citation import Citation
 from backend.rag.evidence_builder import EvidenceEntry
 from backend.rag.service import RetrievalResult
+from backend.runners.chat_runner import ChatRunResult
+from backend.storage.sqlite_store import SQLiteStore
 
 
 def _settings_simple(tmp_path) -> OpenAgentSettings:
@@ -115,3 +117,53 @@ def test_engine_trace_events_sequence(
     assert "evidence_update" in types
     assert "completed" in types
     conn.close()
+
+
+@patch("backend.kernel.engine.discover_agent_templates", return_value=[])
+@patch("backend.kernel.engine.resolve_matched_skills", return_value=[])
+@patch("backend.kernel.engine.route_query", return_value={"mode": "single", "effective_query": "hello"})
+@patch("backend.kernel.engine.build_chat_runner")
+def test_engine_skips_memory_write_for_user_cancelled(
+    mock_build_runner,
+    _mock_route,
+    _mock_skills,
+    _mock_templates,
+    tmp_path,
+) -> None:
+    settings = _settings_simple(tmp_path)
+    settings.memory.fragments_enabled = False
+    settings.memory.consolidation_enabled = False
+    sqlite = SQLiteStore(settings.storage.sqlite_path)
+    qdrant = MagicMock()
+    runner = MagicMock()
+    runner.llm_adapter = MagicMock()
+    runner.run.return_value = ChatRunResult(
+        answer="partial answer",
+        citations=[],
+        evidence_entries=[],
+        degraded=True,
+        run_id="cancelled-run",
+        retrieval_state={},
+        degrade_reason="user_cancelled",
+    )
+    mock_build_runner.return_value = (runner, sqlite, qdrant)
+
+    out = KernelEngine(settings=settings).run_chat("hello", session_id="s_cancelled")
+
+    assert out.degrade_reason == "user_cancelled"
+
+    import sqlite3
+
+    conn = sqlite3.connect(settings.storage.sqlite_path)
+    try:
+        turns = conn.execute("SELECT COUNT(*) FROM chat_session_turn").fetchone()[0]
+        skipped = conn.execute(
+            """
+            SELECT COUNT(*) FROM trace_event
+            WHERE event_type = 'memory_write_skipped'
+            """
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert turns == 0
+    assert skipped == 1
