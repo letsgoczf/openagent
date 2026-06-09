@@ -245,7 +245,15 @@ class KernelEngine:
                     rolling_summary=rolling_summary,
                     reconstructed_memory=reconstructed_memory,
                 )
-            if self.settings.memory.enabled:
+            if (
+                self.settings.memory.enabled
+                and result.degrade_reason == "user_cancelled"
+            ):
+                trace.emit(
+                    "memory_write_skipped",
+                    {"session_id": sid, "reason": "user_cancelled"},
+                )
+            elif self.settings.memory.enabled:
                 body = strip_citations_footer_from_answer(result.answer)
                 trace.emit(
                     "memory_write",

@@ -24,6 +24,7 @@ import {
   type ChatSessionPersisted,
 } from "@/lib/chatSessionPersistence";
 import {
+  ChatSessionsConflictError,
   fetchChatSessionsState,
   putChatSessionsState,
 } from "@/lib/chatSessionsApi";
@@ -163,6 +164,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const activeRequestIdRef = useRef<string | null>(null);
   const persistSkipRef = useRef(true);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stateRevisionRef = useRef(0);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -174,6 +176,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       try {
         const remote = await fetchChatSessionsState();
         if (cancelled) return;
+        stateRevisionRef.current = remote.stateRevision ?? 0;
         if (remote.sessions.length > 0) {
           const activeOk = remote.sessions.some(
             (s) => s.id === remote.activeSessionId
@@ -186,8 +189,12 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         } else {
           const legacy = loadChatSessionsFile();
           if (legacy && legacy.sessions.length > 0) {
-            await putChatSessionsState(legacy);
+            const saved = await putChatSessionsState({
+              ...legacy,
+              baseRevision: stateRevisionRef.current,
+            });
             if (cancelled) return;
+            stateRevisionRef.current = saved.stateRevision;
             clearLegacyChatSessionsStorage();
             setSessions(legacy.sessions);
             setActiveSessionId(legacy.activeSessionId);
@@ -197,7 +204,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             await putChatSessionsState({
               version: CHAT_SESSIONS_VERSION,
               activeSessionId: s.id,
+              baseRevision: stateRevisionRef.current,
               sessions: initial,
+            }).then((saved) => {
+              stateRevisionRef.current = saved.stateRevision;
             });
             if (cancelled) return;
             setSessions(initial);
@@ -245,10 +255,18 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       void putChatSessionsState({
         version: CHAT_SESSIONS_VERSION,
         activeSessionId,
+        baseRevision: stateRevisionRef.current,
         sessions,
-      }).catch((err) => {
-        console.error("chat sessions persist", err);
-      });
+      })
+        .then((saved) => {
+          stateRevisionRef.current = saved.stateRevision;
+        })
+        .catch((err) => {
+          console.error("chat sessions persist", err);
+          if (err instanceof ChatSessionsConflictError) {
+            setError(err.message);
+          }
+        });
     }, 450);
     return () => {
       if (persistTimerRef.current) {
