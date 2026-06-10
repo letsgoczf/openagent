@@ -16,12 +16,12 @@ def sqlite_db(tmp_path):
     store.close()
 
 
-def _seed_doc(store: SQLiteStore, text: str) -> tuple[str, str, str]:
+def _seed_doc(store: SQLiteStore, text: str, *, status: str = "ready") -> tuple[str, str, str]:
     doc_id = str(uuid.uuid4())
     ver_id = str(uuid.uuid4())
     chunk_id = str(uuid.uuid4())
     store.insert_document(doc_id, "/tmp/x.pdf", "x.pdf", "pdf")
-    store.insert_document_version(ver_id, doc_id, "hash1", "ext-v1", "tiktoken:test", "ready")
+    store.insert_document_version(ver_id, doc_id, "hash1", "ext-v1", "tiktoken:test", status)
     store.insert_chunk(
         chunk_id,
         ver_id,
@@ -47,6 +47,35 @@ def test_sqlite_fts5_returns_chunk_id(sqlite_db: SQLiteStore) -> None:
     _, _, chunk_id = _seed_doc(sqlite_db, "alpha beta gamma uniqueword")
     hits = sqlite_db.query_fts5("uniqueword", limit=5)
     assert any(h["chunk_id"] == chunk_id for h in hits)
+
+
+def test_sqlite_fts5_excludes_unfinished_document_versions(sqlite_db: SQLiteStore) -> None:
+    _, ready_ver, ready_chunk = _seed_doc(
+        sqlite_db,
+        "sharedterm safe completed content",
+        status="completed",
+    )
+    _, failed_ver, failed_chunk = _seed_doc(
+        sqlite_db,
+        "sharedterm poison failed content",
+        status="failed",
+    )
+    _, processing_ver, processing_chunk = _seed_doc(
+        sqlite_db,
+        "sharedterm partial processing content",
+        status="processing",
+    )
+
+    hits = sqlite_db.query_fts5("sharedterm", limit=10)
+    hit_ids = {h["chunk_id"] for h in hits}
+    assert ready_chunk in hit_ids
+    assert failed_chunk not in hit_ids
+    assert processing_chunk not in hit_ids
+
+    assert sqlite_db.list_retrievable_version_ids() == [ready_ver]
+    assert sqlite_db.list_retrievable_version_ids(
+        [ready_ver, failed_ver, processing_ver]
+    ) == [ready_ver]
 
 
 def test_list_document_summaries(sqlite_db: SQLiteStore) -> None:

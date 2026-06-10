@@ -218,6 +218,63 @@ def test_retrieval_candidate_debug_flag(tmp_path) -> None:
     qd.close()
 
 
+def test_retrieval_excludes_failed_and_processing_versions(tmp_path) -> None:
+    db = tmp_path / "status-filter.db"
+    store = SQLiteStore(db)
+    qd = QdrantStore("status_filter", vector_size=4, location=":memory:")
+    qd.ensure_collection()
+    vec = [1.0, 0.0, 0.0, 0.0]
+
+    chunks: dict[str, tuple[str, str]] = {}
+    for status, text in (
+        ("completed", "sharedterm safe completed content"),
+        ("failed", "sharedterm poison failed content"),
+        ("processing", "sharedterm partial processing content"),
+    ):
+        doc_id, ver_id, cid = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+        store.insert_document(doc_id, f"/tmp/{status}.pdf", f"{status}.pdf", "pdf")
+        store.insert_document_version(ver_id, doc_id, f"h-{status}", "ev1", "tok", status)
+        store.insert_chunk(cid, ver_id, "text", 0, text, {"page_number": 1}, page_number=1)
+        qd.upsert_embedding(
+            vec,
+            chunk_id=cid,
+            version_id=ver_id,
+            origin_type="text",
+            unit_type="pdf_page",
+            unit_number=1,
+        )
+        chunks[status] = (ver_id, cid)
+
+    svc = RetrievalService(store, qd, TokenizerService(model_id="gpt-4"), settings=_settings())
+    result = svc.retrieve(
+        "sharedterm",
+        vec,
+        top_k_dense=10,
+        top_k_keyword=10,
+        rerank_top_n=10,
+        candidate_debug=True,
+    )
+
+    completed_ver, completed_chunk = chunks["completed"]
+    failed_ver, failed_chunk = chunks["failed"]
+    processing_ver, processing_chunk = chunks["processing"]
+
+    assert [entry.version_id for entry in result.evidence_entries] == [completed_ver]
+    assert [entry.chunk_id for entry in result.evidence_entries] == [completed_chunk]
+    assert result.candidate_debug is not None
+    dense_ids = {h["chunk_id"] for h in result.candidate_debug["dense_hits"]}
+    keyword_ids = {h["chunk_id"] for h in result.candidate_debug["keyword_hits"]}
+    assert failed_chunk not in dense_ids
+    assert processing_chunk not in dense_ids
+    assert failed_chunk not in keyword_ids
+    assert processing_chunk not in keyword_ids
+    assert failed_ver not in {entry.version_id for entry in result.evidence_entries}
+    assert processing_ver not in {entry.version_id for entry in result.evidence_entries}
+
+    store.close()
+    qd.close()
+
+
 def test_truncate_respects_budget() -> None:
     tok = TokenizerService(encoding_name="cl100k_base")
     t = "hello " * 100
