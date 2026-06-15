@@ -140,10 +140,11 @@ def test_qdrant_delete_by_version_ids() -> None:
 
 
 def test_ui_chat_state_roundtrip(sqlite_db: SQLiteStore) -> None:
-    active, sessions = sqlite_db.get_ui_chat_state()
+    active, sessions, revision = sqlite_db.get_ui_chat_state()
     assert active is None
     assert sessions == []
-    sqlite_db.put_ui_chat_state(
+    assert revision == 0
+    saved_revision = sqlite_db.put_ui_chat_state(
         active_session_id="s_1",
         sessions=[
             {
@@ -155,9 +156,12 @@ def test_ui_chat_state_roundtrip(sqlite_db: SQLiteStore) -> None:
                 "lastCitations": [],
             }
         ],
+        expected_revision=revision,
     )
-    active, rows = sqlite_db.get_ui_chat_state()
+    assert saved_revision == 1
+    active, rows, next_revision = sqlite_db.get_ui_chat_state()
     assert active == "s_1"
+    assert next_revision == 1
     assert len(rows) == 1
     assert rows[0]["id"] == "s_1"
     assert rows[0]["title"] == "hi"
