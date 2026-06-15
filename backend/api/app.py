@@ -10,6 +10,7 @@ from backend.api.routes.jobs import router as jobs_router
 from backend.api.routes.runtime_config import router as runtime_config_router
 from backend.api.routes.traces import router as traces_router
 from backend.api.errors import ApiException, api_exception_handler
+from backend.api.origin_policy import get_allowed_origins
 from backend.api.ws_handler import ws_router
 
 
@@ -17,8 +18,8 @@ app = FastAPI(title="OpenAgent API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=get_allowed_origins(),
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

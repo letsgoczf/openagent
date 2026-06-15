@@ -23,6 +23,19 @@ export interface ChatSessionsFile {
   sessions: ChatSessionPersisted[];
 }
 
+export interface ChatSessionsState extends ChatSessionsFile {
+  stateRevision: number;
+}
+
+export interface ChatSessionsPutBody extends ChatSessionsFile {
+  baseRevision: number;
+}
+
+export interface ChatSessionsSaveResult {
+  ok: boolean;
+  stateRevision: number;
+}
+
 function newSessionId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return `s_${crypto.randomUUID()}`;
@@ -106,4 +119,44 @@ export function clearLegacyChatSessionsStorage(): void {
   } catch {
     /* ignore */
   }
+}
+
+export function hasMeaningfulChatSession(s: ChatSessionPersisted): boolean {
+  return (
+    s.messages.length > 0 ||
+    s.lastEvidenceEntries.length > 0 ||
+    s.lastCitations.length > 0 ||
+    (s.title.trim() !== "" && s.title !== "新会话")
+  );
+}
+
+export function mergeChatSessionsState(
+  remote: ChatSessionsFile,
+  local: ChatSessionsFile
+): ChatSessionsFile {
+  const byId = new Map<string, ChatSessionPersisted>();
+  for (const session of remote.sessions) {
+    byId.set(session.id, session);
+  }
+  for (const session of local.sessions) {
+    const existing = byId.get(session.id);
+    if (!existing || session.updatedAt >= existing.updatedAt) {
+      byId.set(session.id, session);
+    }
+  }
+
+  const sessions = [...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+  const localActive = sessions.some((s) => s.id === local.activeSessionId);
+  const remoteActive = sessions.some((s) => s.id === remote.activeSessionId);
+  const activeSessionId = localActive
+    ? local.activeSessionId
+    : remoteActive
+      ? remote.activeSessionId
+      : sessions[0]?.id ?? "";
+
+  return {
+    version: CHAT_SESSIONS_VERSION,
+    activeSessionId,
+    sessions,
+  };
 }
