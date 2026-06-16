@@ -19,7 +19,9 @@ export interface ChatSessionPersisted {
 
 export interface ChatSessionsFile {
   version: number;
-  activeSessionId: string;
+  activeSessionId: string | null;
+  stateRevision?: number;
+  baseRevision?: number;
   sessions: ChatSessionPersisted[];
 }
 
@@ -106,4 +108,38 @@ export function clearLegacyChatSessionsStorage(): void {
   } catch {
     /* ignore */
   }
+}
+
+export function mergeChatSessionsState(
+  local: ChatSessionsFile,
+  remote: ChatSessionsFile
+): ChatSessionsFile {
+  const byId = new Map<string, ChatSessionPersisted>();
+  for (const session of remote.sessions) {
+    byId.set(session.id, session);
+  }
+  for (const session of local.sessions) {
+    const existing = byId.get(session.id);
+    if (!existing || session.updatedAt >= existing.updatedAt) {
+      byId.set(session.id, session);
+    }
+  }
+  const sessions = [...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+  const activeSessionId =
+    (local.activeSessionId &&
+    sessions.some((session) => session.id === local.activeSessionId)
+      ? local.activeSessionId
+      : null) ??
+    (remote.activeSessionId &&
+    sessions.some((session) => session.id === remote.activeSessionId)
+      ? remote.activeSessionId
+      : null) ??
+    sessions[0]?.id ??
+    null;
+  return {
+    version: CHAT_SESSIONS_VERSION,
+    activeSessionId,
+    stateRevision: remote.stateRevision,
+    sessions,
+  };
 }
