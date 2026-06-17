@@ -6,11 +6,13 @@ from backend.config_loader import (
     EmbeddingConfig,
     EvidenceConfig,
     GenerationConfig,
+    MemoryConfig,
     ModelsConfig,
     OpenAgentSettings,
     RagConfig,
     RagRecallConfig,
     RagRerankConfig,
+    SkillsBundleConfig,
     StorageConfig,
     TokenizationConfig,
 )
@@ -19,6 +21,8 @@ from backend.kernel.engine import KernelEngine
 from backend.rag.citation import Citation
 from backend.rag.evidence_builder import EvidenceEntry
 from backend.rag.service import RetrievalResult
+from backend.runners.chat_runner import ChatRunResult
+from backend.storage.sqlite_store import SQLiteStore
 
 
 def _settings_simple(tmp_path) -> OpenAgentSettings:
@@ -50,7 +54,30 @@ def _settings_simple(tmp_path) -> OpenAgentSettings:
             ),
             rerank=RagRerankConfig(strategy="merged_score"),
         ),
+        skills_bundle=SkillsBundleConfig(enabled=False),
     )
+
+
+class _FakeQdrant:
+    client = object()
+
+    def close(self) -> None:
+        pass
+
+
+class _DegradedRunner:
+    llm_adapter = MagicMock()
+
+    def run(self, *args, **kwargs) -> ChatRunResult:
+        return ChatRunResult(
+            answer="partial answer",
+            citations=[],
+            evidence_entries=[],
+            degraded=True,
+            run_id="run_degraded",
+            retrieval_state={},
+            degrade_reason="user_cancelled",
+        )
 
 
 @patch("backend.runners.chat_runner.embed_text", return_value=[1.0, 0.0, 0.0, 0.0])
@@ -115,3 +142,39 @@ def test_engine_trace_events_sequence(
     assert "evidence_update" in types
     assert "completed" in types
     conn.close()
+
+
+@patch("backend.kernel.engine.build_chat_runner")
+def test_engine_does_not_persist_degraded_chat_to_memory(
+    mock_build_runner,
+    tmp_path,
+) -> None:
+    store_path = tmp_path / "engine.db"
+    sqlite = SQLiteStore(store_path)
+    mock_build_runner.return_value = (_DegradedRunner(), sqlite, _FakeQdrant())
+
+    settings = _settings_simple(tmp_path)
+    settings.memory = MemoryConfig(
+        enabled=True,
+        consolidation_enabled=True,
+        fragments_enabled=False,
+    )
+    eng = KernelEngine(settings=settings)
+
+    out = eng.run_chat("please stop", session_id="s_cancelled")
+
+    assert out.degraded is True
+    import sqlite3
+
+    conn = sqlite3.connect(str(store_path))
+    rows = conn.execute(
+        "SELECT role, content FROM chat_session_turn WHERE session_id = ?",
+        ("s_cancelled",),
+    ).fetchall()
+    events = conn.execute(
+        "SELECT event_type FROM trace_event ORDER BY sequence_num"
+    ).fetchall()
+    conn.close()
+
+    assert rows == []
+    assert ("memory_write_skipped",) in events
