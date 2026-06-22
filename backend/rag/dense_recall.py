@@ -13,6 +13,8 @@ def dense_recall(
     version_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Qdrant dense top-k; optional ``version_ids`` scope (OR)."""
+    if version_ids is not None and not version_ids:
+        return []
     hits = store.search(
         query_vector,
         limit=top_k,
