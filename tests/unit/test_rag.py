@@ -218,6 +218,74 @@ def test_retrieval_candidate_debug_flag(tmp_path) -> None:
     qd.close()
 
 
+def test_retrieval_excludes_non_retrievable_document_versions(tmp_path) -> None:
+    db = tmp_path / "status.db"
+    store = SQLiteStore(db)
+    qd = QdrantStore("status_scope", vector_size=4, location=":memory:")
+    qd.ensure_collection()
+    vec = [1.0, 0.0, 0.0, 0.0]
+    versions: dict[str, str] = {}
+    chunk_ids: dict[str, str] = {}
+
+    for status in ("ready", "completed", "processing", "failed"):
+        doc_id, ver_id = str(uuid.uuid4()), str(uuid.uuid4())
+        cid = str(uuid.uuid4())
+        versions[status] = ver_id
+        chunk_ids[status] = cid
+        store.insert_document(doc_id, f"/{status}", f"{status}.txt", "text/plain")
+        store.insert_document_version(ver_id, doc_id, status, "ev1", "tok", status)
+        store.insert_chunk(
+            cid,
+            ver_id,
+            "text",
+            0,
+            f"alpha {status}",
+            {"unit_index": 1},
+        )
+        qd.upsert_embedding(
+            vec,
+            chunk_id=cid,
+            version_id=ver_id,
+            origin_type="text",
+            unit_type="unit",
+            unit_number=1,
+        )
+
+    svc = RetrievalService(
+        store,
+        qd,
+        TokenizerService(model_id="gpt-4"),
+        settings=_settings(),
+    )
+    out = svc.retrieve(
+        "alpha",
+        vec,
+        top_k_dense=10,
+        top_k_keyword=10,
+        max_candidates=10,
+        rerank_top_n=10,
+    )
+
+    retrieved_versions = {e.version_id for e in out.evidence_entries}
+    assert versions["ready"] in retrieved_versions
+    assert versions["completed"] in retrieved_versions
+    assert versions["processing"] not in retrieved_versions
+    assert versions["failed"] not in retrieved_versions
+    assert chunk_ids["failed"] not in {c.chunk_id for c in out.citations}
+
+    scoped = svc.retrieve(
+        "alpha",
+        vec,
+        version_scope=[versions["failed"]],
+        candidate_debug=True,
+    )
+    assert scoped.evidence_entries == []
+    assert scoped.citations == []
+    assert scoped.candidate_debug == {"dense_hits": [], "keyword_hits": [], "merged": []}
+    store.close()
+    qd.close()
+
+
 def test_truncate_respects_budget() -> None:
     tok = TokenizerService(encoding_name="cl100k_base")
     t = "hello " * 100

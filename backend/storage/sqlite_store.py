@@ -7,6 +7,8 @@ from typing import Any
 
 from backend.storage.schema import apply_schema
 
+RETRIEVABLE_DOCUMENT_VERSION_STATUSES = ("ready", "completed")
+
 
 class SQLiteStore:
     """SQLite persistence for documents, chunks (with FTS5), page_stats, trace_event."""
@@ -131,6 +133,7 @@ class SQLiteStore:
         cond_version = ""
         cond_origin = ""
         extra_args: list[Any] = []
+        status_placeholders = ",".join("?" * len(RETRIEVABLE_DOCUMENT_VERSION_STATUSES))
         if version_ids:
             placeholders = ",".join("?" * len(version_ids))
             cond_version = f" AND c.version_id IN ({placeholders})"
@@ -144,12 +147,42 @@ class SQLiteStore:
             SELECT c.chunk_id, bm25(chunk_fts) AS score
             FROM chunk_fts
             JOIN chunk c ON c.rowid = chunk_fts.rowid
-            WHERE chunk_fts MATCH ?{cond_version}{cond_origin}
+            JOIN document_version dv ON dv.version_id = c.version_id
+            WHERE chunk_fts MATCH ?
+              AND dv.status IN ({status_placeholders})
+              {cond_version}{cond_origin}
             ORDER BY score
             LIMIT ?
         """
-        cur = self._conn.execute(sql, (query, *extra_args, limit))
+        cur = self._conn.execute(
+            sql,
+            (query, *RETRIEVABLE_DOCUMENT_VERSION_STATUSES, *extra_args, limit),
+        )
         return [{"chunk_id": r["chunk_id"], "score": r["score"]} for r in cur.fetchall()]
+
+    def list_retrievable_version_ids(
+        self, version_ids: list[str] | None = None
+    ) -> list[str]:
+        """Return version ids whose document_version status is safe for retrieval."""
+        status_placeholders = ",".join("?" * len(RETRIEVABLE_DOCUMENT_VERSION_STATUSES))
+        args: list[Any] = [*RETRIEVABLE_DOCUMENT_VERSION_STATUSES]
+        cond_version = ""
+        if version_ids is not None:
+            if not version_ids:
+                return []
+            placeholders = ",".join("?" * len(version_ids))
+            cond_version = f" AND version_id IN ({placeholders})"
+            args.extend(version_ids)
+        cur = self._conn.execute(
+            f"""
+            SELECT version_id
+            FROM document_version
+            WHERE status IN ({status_placeholders}){cond_version}
+            ORDER BY rowid
+            """,
+            args,
+        )
+        return [str(r["version_id"]) for r in cur.fetchall()]
 
     def get_chunks_by_ids(self, chunk_ids: list[str]) -> dict[str, dict[str, Any]]:
         """Return chunk_id -> row dicts (with ``source_span`` parsed)."""
@@ -525,13 +558,28 @@ class SQLiteStore:
         sessions: list[dict[str, Any]],
     ) -> None:
         """全量替换 UI 会话表（单用户；事务）。"""
+        cleaned: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for s in sessions:
+            sid = str(s.get("id") or "").strip()
+            if not sid:
+                raise ValueError("session id must not be blank")
+            if sid in seen:
+                raise ValueError("duplicate session id")
+            seen.add(sid)
+            row = dict(s)
+            row["id"] = sid
+            cleaned.append(row)
+
+        active = (active_session_id or "").strip() or None
+        if active and active not in seen:
+            raise ValueError("active_session_id must refer to an existing session")
+
         self._conn.execute("BEGIN")
         try:
             self._conn.execute("DELETE FROM ui_chat_session")
-            for s in sessions:
-                sid = str(s.get("id") or "").strip()
-                if not sid:
-                    continue
+            for s in cleaned:
+                sid = str(s["id"])
                 title = str(s.get("title") or "新会话")
                 updated = int(s.get("updatedAt") or 0)
                 payload = {
@@ -551,7 +599,7 @@ class SQLiteStore:
                 INSERT INTO ui_preferences (key, value) VALUES (?, ?)
                 ON CONFLICT(key) DO UPDATE SET value = excluded.value
                 """,
-                ("active_chat_session_id", active_session_id or ""),
+                ("active_chat_session_id", active or ""),
             )
             self._conn.commit()
         except Exception:
