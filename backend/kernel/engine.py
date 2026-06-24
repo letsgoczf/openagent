@@ -33,6 +33,10 @@ from backend.runners.composer import strip_citations_footer_from_answer
 from backend.storage.qdrant_store import QdrantStore
 
 
+def _should_persist_chat_memory(result: ChatRunResult) -> bool:
+    return result.degrade_reason != "user_cancelled"
+
+
 class KernelEngine:
     """
     Kernel 编排：RunContext + Trace + Router stub → ChatRunner + Tool Loop。
@@ -245,7 +249,7 @@ class KernelEngine:
                     rolling_summary=rolling_summary,
                     reconstructed_memory=reconstructed_memory,
                 )
-            if self.settings.memory.enabled:
+            if self.settings.memory.enabled and _should_persist_chat_memory(result):
                 body = strip_citations_footer_from_answer(result.answer)
                 trace.emit(
                     "memory_write",

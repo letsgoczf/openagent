@@ -6,6 +6,7 @@ from backend.config_loader import (
     EmbeddingConfig,
     EvidenceConfig,
     GenerationConfig,
+    MemoryConfig,
     ModelsConfig,
     OpenAgentSettings,
     RagConfig,
@@ -14,11 +15,16 @@ from backend.config_loader import (
     StorageConfig,
     TokenizationConfig,
 )
+from backend.kernel.blackboard import Blackboard
 from backend.kernel.budget import Budget
 from backend.kernel.engine import KernelEngine
+from backend.kernel.multi_chat import run_sequential_two_agent
+from backend.kernel.run_context import RunContext
 from backend.rag.citation import Citation
 from backend.rag.evidence_builder import EvidenceEntry
 from backend.rag.service import RetrievalResult
+from backend.runners.chat_runner import ChatRunResult
+from backend.storage.sqlite_store import SQLiteStore
 
 
 def _settings_simple(tmp_path) -> OpenAgentSettings:
@@ -115,3 +121,102 @@ def test_engine_trace_events_sequence(
     assert "evidence_update" in types
     assert "completed" in types
     conn.close()
+
+
+def test_engine_does_not_persist_cancelled_chat_to_memory(tmp_path) -> None:
+    settings = _settings_simple(tmp_path).model_copy(
+        update={
+            "memory": MemoryConfig(
+                enabled=True,
+                consolidation_enabled=False,
+                fragments_enabled=False,
+            )
+        }
+    )
+    sqlite = SQLiteStore(tmp_path / "engine.db")
+    runner = MagicMock()
+    runner.llm_adapter = MagicMock()
+    runner.run.return_value = ChatRunResult(
+        answer="partial stopped answer",
+        citations=[],
+        evidence_entries=[],
+        degraded=True,
+        run_id="run-cancelled",
+        retrieval_state={},
+        degrade_reason="user_cancelled",
+    )
+    qdrant = MagicMock()
+
+    with patch(
+        "backend.kernel.engine.build_chat_runner",
+        return_value=(runner, sqlite, qdrant),
+    ):
+        result = KernelEngine(settings=settings).run_chat(
+            "remember this",
+            session_id="sess-cancelled",
+            budget=Budget(max_llm_calls=3),
+        )
+
+    assert result.degrade_reason == "user_cancelled"
+    check = SQLiteStore(tmp_path / "engine.db")
+    rows = check.fetch_chat_session_turns_recent("sess-cancelled", 10)
+    assert rows == []
+    check.close()
+
+
+def test_multi_chat_returns_after_cancelled_analyst() -> None:
+    class _Trace:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, dict[str, object] | None]] = []
+
+        def emit(
+            self,
+            event_type: str,
+            payload: dict[str, object] | None = None,
+        ) -> None:
+            self.events.append((event_type, payload))
+
+    class _Runner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run(self, *args, **kwargs) -> ChatRunResult:
+            self.calls += 1
+            if self.calls > 1:
+                raise AssertionError("synthesizer should not run after cancellation")
+            return ChatRunResult(
+                answer="partial draft",
+                citations=[],
+                evidence_entries=[],
+                degraded=True,
+                run_id="run-multi-cancelled",
+                retrieval_state={"phase": "analyst"},
+                degrade_reason="user_cancelled",
+            )
+
+    runner = _Runner()
+    trace = _Trace()
+    ctx = RunContext(
+        run_id="run-multi-cancelled",
+        session_id="sess-multi-cancelled",
+        budget=Budget(max_llm_calls=3),
+    )
+
+    result = run_sequential_two_agent(
+        runner=runner,  # type: ignore[arg-type]
+        ctx=ctx,
+        trace=trace,  # type: ignore[arg-type]
+        blackboard=Blackboard(),
+        effective_query="question",
+        version_scope=None,
+        stream=False,
+        stream_writer=None,
+        prompt_addons=None,
+    )
+
+    assert result.degrade_reason == "user_cancelled"
+    assert runner.calls == 1
+    assert (
+        "merge_started",
+        {"strategy": "cancelled_after_analyst", "sub_agents": ["sub_analyst"]},
+    ) in trace.events
