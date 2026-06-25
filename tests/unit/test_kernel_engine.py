@@ -6,6 +6,7 @@ from backend.config_loader import (
     EmbeddingConfig,
     EvidenceConfig,
     GenerationConfig,
+    MemoryConfig,
     ModelsConfig,
     OpenAgentSettings,
     RagConfig,
@@ -19,6 +20,8 @@ from backend.kernel.engine import KernelEngine
 from backend.rag.citation import Citation
 from backend.rag.evidence_builder import EvidenceEntry
 from backend.rag.service import RetrievalResult
+from backend.runners.chat_runner import ChatRunResult
+from backend.storage.sqlite_store import SQLiteStore
 
 
 def _settings_simple(tmp_path) -> OpenAgentSettings:
@@ -115,3 +118,53 @@ def test_engine_trace_events_sequence(
     assert "evidence_update" in types
     assert "completed" in types
     conn.close()
+
+
+@patch("backend.kernel.engine.build_chat_runner")
+def test_engine_skips_memory_write_for_user_cancelled(
+    mock_build_runner,
+    tmp_path,
+) -> None:
+    settings = _settings_simple(tmp_path)
+    settings.memory = MemoryConfig(
+        enabled=True,
+        consolidation_enabled=False,
+        fragments_enabled=False,
+    )
+
+    sqlite = SQLiteStore(settings.storage.sqlite_path)
+    runner = MagicMock()
+    runner.llm_adapter = MagicMock()
+    runner.run.return_value = ChatRunResult(
+        answer="partial assistant text",
+        citations=[],
+        evidence_entries=[],
+        degraded=True,
+        run_id="run_cancelled",
+        retrieval_state={},
+        degrade_reason="user_cancelled",
+    )
+    qdrant = MagicMock()
+    mock_build_runner.return_value = (runner, sqlite, qdrant)
+
+    out = KernelEngine(settings=settings).run_chat(
+        "stop this",
+        session_id="sid_cancel",
+        budget=Budget(max_llm_calls=3),
+    )
+
+    assert out.degrade_reason == "user_cancelled"
+
+    import sqlite3
+
+    conn = sqlite3.connect(str(tmp_path / "engine.db"))
+    turns = conn.execute(
+        "SELECT role, content FROM chat_session_turn ORDER BY id"
+    ).fetchall()
+    events = conn.execute(
+        "SELECT event_type FROM trace_event ORDER BY sequence_num"
+    ).fetchall()
+    conn.close()
+
+    assert turns == []
+    assert "memory_write_skipped" in [row[0] for row in events]
