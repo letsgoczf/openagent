@@ -19,6 +19,8 @@ from backend.kernel.engine import KernelEngine
 from backend.rag.citation import Citation
 from backend.rag.evidence_builder import EvidenceEntry
 from backend.rag.service import RetrievalResult
+from backend.runners.chat_runner import ChatRunResult
+from backend.storage.sqlite_store import SQLiteStore
 
 
 def _settings_simple(tmp_path) -> OpenAgentSettings:
@@ -115,3 +117,37 @@ def test_engine_trace_events_sequence(
     assert "evidence_update" in types
     assert "completed" in types
     conn.close()
+
+
+@patch("backend.kernel.engine.build_chat_runner")
+def test_engine_skips_memory_write_for_cancelled_result(mock_build, tmp_path) -> None:
+    settings = _settings_simple(tmp_path)
+    settings.memory.enabled = True
+    settings.memory.consolidation_enabled = False
+    settings.memory.fragments_enabled = False
+
+    sqlite = SQLiteStore(settings.storage.sqlite_path)
+    qdrant = MagicMock()
+    runner = MagicMock()
+    runner.llm_adapter = MagicMock()
+    runner.run.return_value = ChatRunResult(
+        answer="partial answer",
+        citations=[],
+        evidence_entries=[],
+        degraded=True,
+        run_id="run_cancelled",
+        retrieval_state={},
+        degrade_reason="user_cancelled",
+    )
+    mock_build.return_value = (runner, sqlite, qdrant)
+
+    eng = KernelEngine(settings=settings)
+    out = eng.run_chat("hello", session_id="sess_cancel", budget=Budget())
+
+    assert out.degrade_reason == "user_cancelled"
+
+    check = SQLiteStore(settings.storage.sqlite_path)
+    try:
+        assert check.fetch_chat_session_turns_recent("sess_cancel", 10) == []
+    finally:
+        check.close()

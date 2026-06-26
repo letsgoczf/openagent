@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import threading
 import uuid
 from pathlib import Path
@@ -22,6 +23,11 @@ from backend.storage.sqlite_store import SQLiteStore
 
 router = APIRouter(prefix="/v1/documents", tags=["documents"])
 
+MAX_DOCUMENT_UPLOAD_BYTES = int(
+    os.getenv("OPENAGENT_MAX_DOCUMENT_UPLOAD_BYTES", str(25 * 1024 * 1024))
+)
+UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
+
 
 def _resolve_embedding_dim(cfg: OpenAgentSettings) -> int:
     dim = cfg.models.embedding.vector_dimensions
@@ -42,7 +48,12 @@ def _run_document_import_job(
 
     dim = _resolve_embedding_dim(cfg)
     qclient = build_qdrant_client(cfg.storage.qdrant)
-    qdrant = QdrantStore(cfg.storage.qdrant.collection_name, vector_size=dim, client=qclient)
+    qdrant = QdrantStore(
+        cfg.storage.qdrant.collection_name,
+        vector_size=dim,
+        client=qclient,
+        owns_client=True,
+    )
 
     trace = TraceWriter(sqlite, job_id)
     tokenizer = create_tokenizer_service(cfg)
@@ -179,9 +190,28 @@ def _run_document_import_job(
         sqlite.close()
 
 
+async def _read_upload_file_limited(file: UploadFile) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(UPLOAD_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_DOCUMENT_UPLOAD_BYTES:
+            raise ApiException(
+                code="document.upload_too_large",
+                message="document upload exceeds size limit",
+                status_code=413,
+                detail={"max_bytes": MAX_DOCUMENT_UPLOAD_BYTES},
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @router.post("/import", response_model=dict)
 async def import_document(file: UploadFile = File(...)) -> dict[str, Any]:
-    file_bytes = await file.read()
+    file_bytes = await _read_upload_file_limited(file)
     filename = file.filename or "upload.bin"
     file_type = file.content_type or "application/octet-stream"
 
@@ -212,7 +242,12 @@ async def delete_document(doc_id: str) -> dict[str, Any]:
     sqlite = SQLiteStore(cfg.storage.sqlite_path)
     dim = _resolve_embedding_dim(cfg)
     qclient = build_qdrant_client(cfg.storage.qdrant)
-    qdrant = QdrantStore(cfg.storage.qdrant.collection_name, vector_size=dim, client=qclient)
+    qdrant = QdrantStore(
+        cfg.storage.qdrant.collection_name,
+        vector_size=dim,
+        client=qclient,
+        owns_client=True,
+    )
     try:
         doc = sqlite.get_document_summary(doc_id)
         if doc is None:
@@ -223,8 +258,8 @@ async def delete_document(doc_id: str) -> dict[str, Any]:
                 detail={"doc_id": doc_id},
             )
         version_ids = sqlite.list_version_ids_by_doc_id(doc_id)
-        sqlite.delete_document(doc_id)
         qdrant.delete_by_version_ids(version_ids)
+        sqlite.delete_document(doc_id)
         return {"ok": True, "doc_id": doc_id, "deleted_versions": len(version_ids)}
     finally:
         qdrant.close()

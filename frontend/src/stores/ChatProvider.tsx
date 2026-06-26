@@ -21,9 +21,12 @@ import {
   clearLegacyChatSessionsStorage,
   createEmptySession,
   loadChatSessionsFile,
+  mergeChatSessionsState,
   type ChatSessionPersisted,
+  type ChatSessionsFile,
 } from "@/lib/chatSessionPersistence";
 import {
+  ChatSessionsConflictError,
   fetchChatSessionsState,
   putChatSessionsState,
 } from "@/lib/chatSessionsApi";
@@ -138,6 +141,16 @@ function normalizeAnswerText(raw: unknown): string {
   return String(raw);
 }
 
+function normalizeActiveSessionId(state: ChatSessionsFile): string | null {
+  if (
+    state.activeSessionId &&
+    state.sessions.some((s) => s.id === state.activeSessionId)
+  ) {
+    return state.activeSessionId;
+  }
+  return state.sessions[0]?.id ?? null;
+}
+
 export function ChatProvider({ children }: { children: React.ReactNode }) {
   const [sessions, setSessions] = useState<ChatSessionPersisted[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -163,10 +176,55 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const activeRequestIdRef = useRef<string | null>(null);
   const persistSkipRef = useRef(true);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stateRevisionRef = useRef(0);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
+
+  const persistSnapshot = useCallback(
+    async (
+      snapshot: ChatSessionsFile,
+      options: { updateStateOnConflict?: boolean; keepalive?: boolean } = {}
+    ): Promise<ChatSessionsFile> => {
+      const normalized: ChatSessionsFile = {
+        ...snapshot,
+        activeSessionId: normalizeActiveSessionId(snapshot),
+      };
+      try {
+        const saved = await putChatSessionsState(
+          {
+            ...normalized,
+            baseRevision: stateRevisionRef.current,
+          },
+          options.keepalive ? { keepalive: true } : undefined
+        );
+        stateRevisionRef.current = saved.stateRevision;
+        return normalized;
+      } catch (err) {
+        if (!(err instanceof ChatSessionsConflictError)) {
+          throw err;
+        }
+        const latest = await fetchChatSessionsState();
+        const merged = mergeChatSessionsState(latest, normalized);
+        const canonical: ChatSessionsFile = {
+          ...merged,
+          activeSessionId: normalizeActiveSessionId(merged),
+        };
+        const saved = await putChatSessionsState({
+          ...canonical,
+          baseRevision: latest.stateRevision,
+        });
+        stateRevisionRef.current = saved.stateRevision;
+        if (options.updateStateOnConflict) {
+          setSessions(canonical.sessions);
+          setActiveSessionId(canonical.activeSessionId);
+        }
+        return canonical;
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -174,34 +232,42 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       try {
         const remote = await fetchChatSessionsState();
         if (cancelled) return;
+        stateRevisionRef.current = remote.stateRevision;
+        const legacy = loadChatSessionsFile();
         if (remote.sessions.length > 0) {
-          const activeOk = remote.sessions.some(
-            (s) => s.id === remote.activeSessionId
-          );
-          setSessions(remote.sessions);
-          setActiveSessionId(
-            activeOk ? remote.activeSessionId! : remote.sessions[0]!.id
-          );
-          clearLegacyChatSessionsStorage();
-        } else {
-          const legacy = loadChatSessionsFile();
+          const merged = mergeChatSessionsState(remote, legacy);
+          const normalized: ChatSessionsFile = {
+            ...merged,
+            activeSessionId: normalizeActiveSessionId(merged),
+          };
           if (legacy && legacy.sessions.length > 0) {
-            await putChatSessionsState(legacy);
+            const persisted = await persistSnapshot(normalized);
             if (cancelled) return;
             clearLegacyChatSessionsStorage();
-            setSessions(legacy.sessions);
-            setActiveSessionId(legacy.activeSessionId);
+            setSessions(persisted.sessions);
+            setActiveSessionId(persisted.activeSessionId);
+          } else {
+            setSessions(normalized.sessions);
+            setActiveSessionId(normalized.activeSessionId);
+          }
+        } else {
+          if (legacy && legacy.sessions.length > 0) {
+            const persisted = await persistSnapshot(legacy);
+            if (cancelled) return;
+            clearLegacyChatSessionsStorage();
+            setSessions(persisted.sessions);
+            setActiveSessionId(persisted.activeSessionId);
           } else {
             const s = createEmptySession();
             const initial: ChatSessionPersisted[] = [s];
-            await putChatSessionsState({
+            const persisted = await persistSnapshot({
               version: CHAT_SESSIONS_VERSION,
               activeSessionId: s.id,
               sessions: initial,
             });
             if (cancelled) return;
-            setSessions(initial);
-            setActiveSessionId(s.id);
+            setSessions(persisted.sessions);
+            setActiveSessionId(persisted.activeSessionId);
           }
         }
       } catch (e) {
@@ -226,7 +292,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [persistSnapshot]);
 
   useEffect(() => {
     if (!sessionsReady || activeSessionId === null || sessions.length === 0) {
@@ -242,11 +308,14 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
     persistTimerRef.current = setTimeout(() => {
       persistTimerRef.current = null;
-      void putChatSessionsState({
-        version: CHAT_SESSIONS_VERSION,
-        activeSessionId,
-        sessions,
-      }).catch((err) => {
+      void persistSnapshot(
+        {
+          version: CHAT_SESSIONS_VERSION,
+          activeSessionId,
+          sessions,
+        },
+        { updateStateOnConflict: true }
+      ).catch((err) => {
         console.error("chat sessions persist", err);
       });
     }, 450);
@@ -256,7 +325,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         persistTimerRef.current = null;
       }
     };
-  }, [sessions, activeSessionId, sessionsReady]);
+  }, [sessions, activeSessionId, sessionsReady, persistSnapshot]);
 
   const sessionView = useMemo(() => {
     const active = sessions.find((s) => s.id === activeSessionId) ?? null;
@@ -657,7 +726,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       };
 
       ws.onclose = () => {
+        if (wsRef.current !== ws) return;
         wsRef.current = null;
+        if (activeRequestIdRef.current) {
+          streamingSessionIdRef.current = null;
+          activeRequestIdRef.current = null;
+          setStreamingCitations([]);
+          setError("WebSocket connection closed");
+          setStatus("error");
+        }
       };
     },
     [appendTrace]
@@ -689,6 +766,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       } catch {
         /* ignore */
       }
+      return;
+    }
+
+    if (req) {
+      wsRef.current = null;
+      streamingSessionIdRef.current = null;
+      activeRequestIdRef.current = null;
+      resetEphemeral();
+      setStatus("idle");
     }
   }, [resetEphemeral]);
 

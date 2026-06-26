@@ -8,6 +8,18 @@ from typing import Any
 from backend.storage.schema import apply_schema
 
 
+class UIChatStateConflict(Exception):
+    """Raised when a UI chat state replacement is based on a stale revision."""
+
+    def __init__(self, current_revision: int) -> None:
+        super().__init__("ui chat state revision conflict")
+        self.current_revision = current_revision
+
+
+class UIChatStateValidationError(ValueError):
+    """Raised before replacing UI chat state when the payload is invalid."""
+
+
 class SQLiteStore:
     """SQLite persistence for documents, chunks (with FTS5), page_stats, trace_event."""
 
@@ -485,8 +497,18 @@ class SQLiteStore:
 
     # --- 前端 Chat UI 会话（整会话 JSON 快照，与 localStorage 结构对齐）---
 
-    def get_ui_chat_state(self) -> tuple[str | None, list[dict[str, Any]]]:
-        """返回 (active_session_id 或 None, sessions 列表，结构与前端 ChatSessionPersisted 一致)。"""
+    def _ui_chat_state_revision(self) -> int:
+        row = self._conn.execute(
+            "SELECT value FROM ui_preferences WHERE key = ?",
+            ("chat_sessions_state_revision",),
+        ).fetchone()
+        try:
+            return max(0, int((row["value"] if row else "") or "0"))
+        except (TypeError, ValueError):
+            return 0
+
+    def get_ui_chat_state(self) -> tuple[str | None, list[dict[str, Any]], int]:
+        """返回 (active_session_id 或 None, sessions 列表, revision)。"""
         row = self._conn.execute(
             "SELECT value FROM ui_preferences WHERE key = ?",
             ("active_chat_session_id",),
@@ -516,29 +538,54 @@ class SQLiteStore:
                     "lastCitations": payload.get("lastCitations") or [],
                 }
             )
-        return active, sessions
+        return active, sessions, self._ui_chat_state_revision()
 
     def put_ui_chat_state(
         self,
         *,
         active_session_id: str | None,
         sessions: list[dict[str, Any]],
-    ) -> None:
-        """全量替换 UI 会话表（单用户；事务）。"""
-        self._conn.execute("BEGIN")
-        try:
-            self._conn.execute("DELETE FROM ui_chat_session")
-            for s in sessions:
-                sid = str(s.get("id") or "").strip()
-                if not sid:
-                    continue
-                title = str(s.get("title") or "新会话")
+        base_revision: int,
+    ) -> int:
+        """条件式全量替换 UI 会话表；返回新 revision。"""
+        if base_revision < 0:
+            raise UIChatStateValidationError("base_revision must be non-negative")
+
+        cleaned: list[tuple[str, str, int, dict[str, Any]]] = []
+        seen: set[str] = set()
+        for s in sessions:
+            sid = str(s.get("id") or "").strip()
+            if not sid:
+                raise UIChatStateValidationError("session id must not be blank")
+            if sid in seen:
+                raise UIChatStateValidationError("duplicate session id")
+            seen.add(sid)
+            title = str(s.get("title") or "新会话")
+            try:
                 updated = int(s.get("updatedAt") or 0)
-                payload = {
-                    "messages": s.get("messages") or [],
-                    "lastEvidenceEntries": s.get("lastEvidenceEntries") or [],
-                    "lastCitations": s.get("lastCitations") or [],
-                }
+            except (TypeError, ValueError) as exc:
+                raise UIChatStateValidationError("updatedAt must be an integer") from exc
+            payload = {
+                "messages": s.get("messages") or [],
+                "lastEvidenceEntries": s.get("lastEvidenceEntries") or [],
+                "lastCitations": s.get("lastCitations") or [],
+            }
+            cleaned.append((sid, title, updated, payload))
+        if not cleaned:
+            raise UIChatStateValidationError("sessions must not be empty")
+
+        active = (active_session_id or "").strip() or None
+        if active is not None and active not in seen:
+            raise UIChatStateValidationError("active_session_id must refer to a session")
+
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            current_revision = self._ui_chat_state_revision()
+            if current_revision != base_revision:
+                raise UIChatStateConflict(current_revision)
+
+            self._conn.execute("DELETE FROM ui_chat_session")
+            for sid, title, updated, payload in cleaned:
                 self._conn.execute(
                     """
                     INSERT INTO ui_chat_session (session_id, title, updated_at_ms, payload_json)
@@ -551,9 +598,18 @@ class SQLiteStore:
                 INSERT INTO ui_preferences (key, value) VALUES (?, ?)
                 ON CONFLICT(key) DO UPDATE SET value = excluded.value
                 """,
-                ("active_chat_session_id", active_session_id or ""),
+                ("active_chat_session_id", active or ""),
+            )
+            next_revision = current_revision + 1
+            self._conn.execute(
+                """
+                INSERT INTO ui_preferences (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                ("chat_sessions_state_revision", str(next_revision)),
             )
             self._conn.commit()
+            return next_revision
         except Exception:
             self._conn.rollback()
             raise

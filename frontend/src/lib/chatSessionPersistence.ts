@@ -19,8 +19,12 @@ export interface ChatSessionPersisted {
 
 export interface ChatSessionsFile {
   version: number;
-  activeSessionId: string;
+  activeSessionId: string | null;
   sessions: ChatSessionPersisted[];
+}
+
+export interface ChatSessionsRemoteFile extends ChatSessionsFile {
+  stateRevision: number;
 }
 
 function newSessionId(): string {
@@ -96,6 +100,54 @@ export function saveChatSessionsFile(data: ChatSessionsFile): void {
   } catch {
     /* quota or private mode */
   }
+}
+
+function hasSession(state: ChatSessionsFile, id: string | null): id is string {
+  return !!id && state.sessions.some((s) => s.id === id);
+}
+
+function shouldReplaceSession(
+  incoming: ChatSessionPersisted,
+  existing: ChatSessionPersisted
+): boolean {
+  if (incoming.messages.length !== existing.messages.length) {
+    return incoming.messages.length > existing.messages.length;
+  }
+  return incoming.updatedAt >= existing.updatedAt;
+}
+
+export function mergeChatSessionsState(
+  remote: ChatSessionsFile,
+  local: ChatSessionsFile | null
+): ChatSessionsFile {
+  if (!local || local.sessions.length === 0) return remote;
+
+  const byId = new Map<string, ChatSessionPersisted>();
+  for (const session of remote.sessions) {
+    if (session.id.trim()) byId.set(session.id, session);
+  }
+  for (const session of local.sessions) {
+    const id = session.id.trim();
+    if (!id) continue;
+    const existing = byId.get(id);
+    if (!existing || shouldReplaceSession(session, existing)) {
+      byId.set(id, { ...session, id });
+    }
+  }
+
+  const sessions = [...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+  const merged: ChatSessionsFile = {
+    version: CHAT_SESSIONS_VERSION,
+    activeSessionId: remote.activeSessionId,
+    sessions,
+  };
+
+  if (hasSession({ ...local, sessions }, local.activeSessionId)) {
+    merged.activeSessionId = local.activeSessionId;
+  } else if (!hasSession(merged, merged.activeSessionId)) {
+    merged.activeSessionId = sessions[0]?.id ?? null;
+  }
+  return merged;
 }
 
 /** 迁移到服务端 DB 后清除旧版 localStorage，避免两套数据源混淆 */
