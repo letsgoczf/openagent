@@ -27,6 +27,8 @@ class ChatSessionsStateDTO(BaseModel):
     version: Literal[1] = 1
     activeSessionId: str | None = None
     sessions: list[ChatSessionPersistedDTO]
+    stateRevision: int = 0
+    baseRevision: int | None = None
 
 
 @router.get("/state", response_model=ChatSessionsStateDTO)
@@ -34,32 +36,52 @@ async def get_chat_sessions_state() -> ChatSessionsStateDTO:
     cfg = load_config()
     sqlite = SQLiteStore(cfg.storage.sqlite_path)
     try:
-        active, rows = sqlite.get_ui_chat_state()
+        active, rows, revision = sqlite.get_ui_chat_state()
         return ChatSessionsStateDTO(
             version=1,
             activeSessionId=active,
             sessions=[ChatSessionPersistedDTO.model_validate(s) for s in rows],
+            stateRevision=revision,
         )
     finally:
         sqlite.close()
 
 
 @router.put("/state", response_model=dict)
-async def put_chat_sessions_state(body: ChatSessionsStateDTO) -> dict[str, bool]:
+async def put_chat_sessions_state(body: ChatSessionsStateDTO) -> dict[str, bool | int]:
     if not body.sessions:
         raise ApiException(
             code="chat_sessions.empty",
             message="sessions must not be empty",
             status_code=400,
         )
-    ids = {s.id for s in body.sessions}
-    if len(ids) != len(body.sessions):
+    if body.baseRevision is None:
         raise ApiException(
-            code="chat_sessions.duplicate_id",
-            message="duplicate session id",
+            code="chat_sessions.missing_base_revision",
+            message="baseRevision is required",
             status_code=400,
         )
-    active = body.activeSessionId
+    ids: set[str] = set()
+    rows: list[dict[str, Any]] = []
+    for s in body.sessions:
+        sid = s.id.strip()
+        if not sid:
+            raise ApiException(
+                code="chat_sessions.bad_id",
+                message="session id must not be blank",
+                status_code=400,
+            )
+        if sid in ids:
+            raise ApiException(
+                code="chat_sessions.duplicate_id",
+                message="duplicate session id",
+                status_code=400,
+            )
+        ids.add(sid)
+        row = s.model_dump(mode="json")
+        row["id"] = sid
+        rows.append(row)
+    active = body.activeSessionId.strip() if body.activeSessionId else None
     if active and active not in ids:
         raise ApiException(
             code="chat_sessions.bad_active",
@@ -69,8 +91,19 @@ async def put_chat_sessions_state(body: ChatSessionsStateDTO) -> dict[str, bool]
     cfg = load_config()
     sqlite = SQLiteStore(cfg.storage.sqlite_path)
     try:
-        rows = [s.model_dump(mode="json") for s in body.sessions]
-        sqlite.put_ui_chat_state(active_session_id=active, sessions=rows)
-        return {"ok": True}
+        next_revision = sqlite.put_ui_chat_state(
+            active_session_id=active,
+            sessions=rows,
+            base_revision=body.baseRevision,
+        )
+        if next_revision is None:
+            _, _, current_revision = sqlite.get_ui_chat_state()
+            raise ApiException(
+                code="chat_sessions.revision_conflict",
+                message="chat session state was updated by another client",
+                status_code=409,
+                detail={"stateRevision": current_revision},
+            )
+        return {"ok": True, "stateRevision": next_revision}
     finally:
         sqlite.close()
