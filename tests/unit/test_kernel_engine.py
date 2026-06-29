@@ -19,6 +19,8 @@ from backend.kernel.engine import KernelEngine
 from backend.rag.citation import Citation
 from backend.rag.evidence_builder import EvidenceEntry
 from backend.rag.service import RetrievalResult
+from backend.runners.chat_runner import ChatRunResult
+from backend.storage.sqlite_store import SQLiteStore
 
 
 def _settings_simple(tmp_path) -> OpenAgentSettings:
@@ -115,3 +117,45 @@ def test_engine_trace_events_sequence(
     assert "evidence_update" in types
     assert "completed" in types
     conn.close()
+
+
+def test_engine_skips_memory_write_for_degraded_result(monkeypatch, tmp_path) -> None:
+    settings = _settings_simple(tmp_path)
+    settings.memory.consolidation_enabled = False
+    settings.memory.fragments_enabled = False
+    store_path = tmp_path / "engine.db"
+
+    class FakeRunner:
+        llm_adapter = MagicMock()
+
+        def run(self, ctx, *_args, **_kwargs):
+            return ChatRunResult(
+                answer="partial cancelled answer",
+                citations=[],
+                evidence_entries=[],
+                degraded=True,
+                run_id=ctx.run_id,
+                retrieval_state={},
+                degrade_reason="user_cancelled",
+            )
+
+    class FakeQdrant:
+        client = MagicMock()
+
+        def close(self) -> None:
+            return None
+
+    def fake_build_chat_runner(*_args, **_kwargs):
+        return FakeRunner(), SQLiteStore(store_path), FakeQdrant()
+
+    monkeypatch.setattr("backend.kernel.engine.build_chat_runner", fake_build_chat_runner)
+
+    eng = KernelEngine(settings=settings)
+    out = eng.run_chat("hello", session_id="sess_cancelled", budget=Budget(max_llm_calls=1))
+
+    assert out.degraded is True
+    store = SQLiteStore(store_path)
+    try:
+        assert store.count_chat_session_turns("sess_cancelled") == 0
+    finally:
+        store.close()

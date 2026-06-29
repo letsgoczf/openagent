@@ -8,6 +8,19 @@ from typing import Any
 from backend.storage.schema import apply_schema
 
 
+UI_CHAT_STATE_REVISION_KEY = "chat_sessions_state_revision"
+RETRIEVABLE_DOCUMENT_STATUSES = ("ready", "completed")
+
+
+class ChatStateRevisionConflict(Exception):
+    def __init__(self, *, expected_revision: int, current_revision: int) -> None:
+        super().__init__(
+            f"stale chat session state revision: expected {expected_revision}, current {current_revision}"
+        )
+        self.expected_revision = expected_revision
+        self.current_revision = current_revision
+
+
 class SQLiteStore:
     """SQLite persistence for documents, chunks (with FTS5), page_stats, trace_event."""
 
@@ -127,7 +140,7 @@ class SQLiteStore:
         version_ids: list[str] | None = None,
         origin_types: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Keyword search over chunk_text; bm25 score (lower is better). Optional version / origin filter."""
+        """Keyword search over retrievable chunk_text; bm25 score (lower is better)."""
         cond_version = ""
         cond_origin = ""
         extra_args: list[Any] = []
@@ -144,7 +157,10 @@ class SQLiteStore:
             SELECT c.chunk_id, bm25(chunk_fts) AS score
             FROM chunk_fts
             JOIN chunk c ON c.rowid = chunk_fts.rowid
-            WHERE chunk_fts MATCH ?{cond_version}{cond_origin}
+            JOIN document_version dv ON dv.version_id = c.version_id
+            WHERE chunk_fts MATCH ?
+              AND dv.status IN ('ready', 'completed')
+              {cond_version}{cond_origin}
             ORDER BY score
             LIMIT ?
         """
@@ -322,6 +338,29 @@ class SQLiteStore:
         ).fetchall()
         return [str(r["version_id"]) for r in rows]
 
+    def list_retrievable_version_ids(
+        self, version_ids: list[str] | None = None
+    ) -> list[str]:
+        """Return versions that are safe to use for retrieval."""
+        if version_ids is not None and not version_ids:
+            return []
+        cond = ""
+        args: list[Any] = list(RETRIEVABLE_DOCUMENT_STATUSES)
+        if version_ids is not None:
+            placeholders = ",".join("?" * len(version_ids))
+            cond = f" AND version_id IN ({placeholders})"
+            args.extend(version_ids)
+        rows = self._conn.execute(
+            f"""
+            SELECT version_id
+            FROM document_version
+            WHERE status IN (?, ?){cond}
+            ORDER BY rowid ASC
+            """,
+            args,
+        ).fetchall()
+        return [str(r["version_id"]) for r in rows]
+
     def delete_document(self, doc_id: str) -> bool:
         """
         删除 document 及其关联版本/chunk/page_stats（依赖 FK CASCADE）。
@@ -485,8 +524,20 @@ class SQLiteStore:
 
     # --- 前端 Chat UI 会话（整会话 JSON 快照，与 localStorage 结构对齐）---
 
-    def get_ui_chat_state(self) -> tuple[str | None, list[dict[str, Any]]]:
-        """返回 (active_session_id 或 None, sessions 列表，结构与前端 ChatSessionPersisted 一致)。"""
+    def _read_ui_chat_state_revision(self) -> int:
+        row = self._conn.execute(
+            "SELECT value FROM ui_preferences WHERE key = ?",
+            (UI_CHAT_STATE_REVISION_KEY,),
+        ).fetchone()
+        if row is None:
+            return 0
+        try:
+            return max(0, int(row["value"]))
+        except (TypeError, ValueError):
+            return 0
+
+    def get_ui_chat_state(self) -> tuple[str | None, list[dict[str, Any]], int]:
+        """返回 (active_session_id, sessions, state_revision)。"""
         row = self._conn.execute(
             "SELECT value FROM ui_preferences WHERE key = ?",
             ("active_chat_session_id",),
@@ -516,17 +567,24 @@ class SQLiteStore:
                     "lastCitations": payload.get("lastCitations") or [],
                 }
             )
-        return active, sessions
+        return active, sessions, self._read_ui_chat_state_revision()
 
     def put_ui_chat_state(
         self,
         *,
         active_session_id: str | None,
         sessions: list[dict[str, Any]],
-    ) -> None:
-        """全量替换 UI 会话表（单用户；事务）。"""
-        self._conn.execute("BEGIN")
+        base_revision: int,
+    ) -> int:
+        """全量替换 UI 会话表；调用方必须基于最新 revision 写入。"""
+        self._conn.execute("BEGIN IMMEDIATE")
         try:
+            current_revision = self._read_ui_chat_state_revision()
+            if int(base_revision) != current_revision:
+                raise ChatStateRevisionConflict(
+                    expected_revision=int(base_revision),
+                    current_revision=current_revision,
+                )
             self._conn.execute("DELETE FROM ui_chat_session")
             for s in sessions:
                 sid = str(s.get("id") or "").strip()
@@ -553,7 +611,16 @@ class SQLiteStore:
                 """,
                 ("active_chat_session_id", active_session_id or ""),
             )
+            next_revision = current_revision + 1
+            self._conn.execute(
+                """
+                INSERT INTO ui_preferences (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (UI_CHAT_STATE_REVISION_KEY, str(next_revision)),
+            )
             self._conn.commit()
+            return next_revision
         except Exception:
             self._conn.rollback()
             raise

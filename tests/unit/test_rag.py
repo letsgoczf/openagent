@@ -218,6 +218,45 @@ def test_retrieval_candidate_debug_flag(tmp_path) -> None:
     qd.close()
 
 
+def test_retrieval_excludes_failed_versions_even_with_vectors(tmp_path) -> None:
+    db = tmp_path / "failed.db"
+    store = SQLiteStore(db)
+    doc_id, ver_id = str(uuid.uuid4()), str(uuid.uuid4())
+    cid = str(uuid.uuid4())
+    store.insert_document(doc_id, "/x", "x.pdf", "pdf")
+    store.insert_document_version(ver_id, doc_id, "h", "ev1", "tok", "failed")
+    store.insert_chunk(
+        cid,
+        ver_id,
+        "text",
+        0,
+        "alpha failed vector",
+        {"page_number": 1},
+        page_number=1,
+    )
+    qd = QdrantStore("failed_versions", vector_size=4, location=":memory:")
+    qd.ensure_collection()
+    vec = [1.0, 0.0, 0.0, 0.0]
+    qd.upsert_embedding(
+        vec,
+        chunk_id=cid,
+        version_id=ver_id,
+        origin_type="text",
+        unit_type="pdf_page",
+        unit_number=1,
+    )
+    svc = RetrievalService(store, qd, TokenizerService(model_id="gpt-4"), settings=_settings())
+
+    out = svc.retrieve("alpha", vec, candidate_debug=True)
+
+    assert out.evidence_entries == []
+    assert out.citations == []
+    assert out.retrieval_state["retrievable_versions"] == 0
+    assert out.candidate_debug == {"dense_hits": [], "keyword_hits": [], "merged": []}
+    store.close()
+    qd.close()
+
+
 def test_truncate_respects_budget() -> None:
     tok = TokenizerService(encoding_name="cl100k_base")
     t = "hello " * 100
