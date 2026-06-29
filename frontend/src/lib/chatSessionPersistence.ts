@@ -19,8 +19,10 @@ export interface ChatSessionPersisted {
 
 export interface ChatSessionsFile {
   version: number;
-  activeSessionId: string;
+  activeSessionId: string | null;
   sessions: ChatSessionPersisted[];
+  stateRevision?: number;
+  baseRevision?: number;
 }
 
 function newSessionId(): string {
@@ -96,6 +98,67 @@ export function saveChatSessionsFile(data: ChatSessionsFile): void {
   } catch {
     /* quota or private mode */
   }
+}
+
+function mergeMessages(
+  older: ChatMessage[],
+  newer: ChatMessage[]
+): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  const seen = new Set<string>();
+  for (const msg of [...older, ...newer]) {
+    if (!msg.id || seen.has(msg.id)) continue;
+    seen.add(msg.id);
+    out.push(msg);
+  }
+  return out;
+}
+
+function mergeSession(
+  remote: ChatSessionPersisted,
+  local: ChatSessionPersisted
+): ChatSessionPersisted {
+  const localNewer = local.updatedAt >= remote.updatedAt;
+  return {
+    id: remote.id,
+    title: localNewer ? local.title : remote.title,
+    updatedAt: Math.max(remote.updatedAt, local.updatedAt),
+    messages: mergeMessages(remote.messages, local.messages),
+    lastEvidenceEntries: localNewer
+      ? local.lastEvidenceEntries
+      : remote.lastEvidenceEntries,
+    lastCitations: localNewer ? local.lastCitations : remote.lastCitations,
+  };
+}
+
+export function mergeChatSessionsState(
+  remote: ChatSessionsFile,
+  local: ChatSessionsFile
+): ChatSessionsFile {
+  const byId = new Map<string, ChatSessionPersisted>();
+  for (const s of remote.sessions) {
+    byId.set(s.id, s);
+  }
+  for (const s of local.sessions) {
+    const prev = byId.get(s.id);
+    byId.set(s.id, prev ? mergeSession(prev, s) : s);
+  }
+  const sessions = [...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+  const activeSessionId =
+    (local.activeSessionId &&
+      sessions.some((s) => s.id === local.activeSessionId) &&
+      local.activeSessionId) ||
+    (remote.activeSessionId &&
+      sessions.some((s) => s.id === remote.activeSessionId) &&
+      remote.activeSessionId) ||
+    sessions[0]?.id ||
+    null;
+  return {
+    version: CHAT_SESSIONS_VERSION,
+    activeSessionId,
+    sessions,
+    stateRevision: remote.stateRevision,
+  };
 }
 
 /** 迁移到服务端 DB 后清除旧版 localStorage，避免两套数据源混淆 */

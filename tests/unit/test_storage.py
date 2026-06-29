@@ -4,6 +4,7 @@ import uuid
 
 import pytest
 
+from backend.storage.sqlite_store import ChatStateRevisionConflict
 from backend.storage.qdrant_store import QdrantStore
 from backend.storage.sqlite_store import SQLiteStore
 
@@ -47,6 +48,28 @@ def test_sqlite_fts5_returns_chunk_id(sqlite_db: SQLiteStore) -> None:
     _, _, chunk_id = _seed_doc(sqlite_db, "alpha beta gamma uniqueword")
     hits = sqlite_db.query_fts5("uniqueword", limit=5)
     assert any(h["chunk_id"] == chunk_id for h in hits)
+
+
+def test_sqlite_fts5_excludes_failed_versions(sqlite_db: SQLiteStore) -> None:
+    doc_id = str(uuid.uuid4())
+    ver_id = str(uuid.uuid4())
+    chunk_id = str(uuid.uuid4())
+    sqlite_db.insert_document(doc_id, "/tmp/bad.pdf", "bad.pdf", "pdf")
+    sqlite_db.insert_document_version(
+        ver_id, doc_id, "hash2", "ext-v1", "tiktoken:test", "failed"
+    )
+    sqlite_db.insert_chunk(
+        chunk_id,
+        ver_id,
+        "text",
+        0,
+        "failedonlytoken",
+        {"page_number": 1},
+        page_number=1,
+    )
+
+    assert sqlite_db.query_fts5("failedonlytoken", limit=5) == []
+    assert sqlite_db.list_retrievable_version_ids([ver_id]) == []
 
 
 def test_list_document_summaries(sqlite_db: SQLiteStore) -> None:
@@ -140,11 +163,13 @@ def test_qdrant_delete_by_version_ids() -> None:
 
 
 def test_ui_chat_state_roundtrip(sqlite_db: SQLiteStore) -> None:
-    active, sessions = sqlite_db.get_ui_chat_state()
+    active, sessions, revision = sqlite_db.get_ui_chat_state()
     assert active is None
     assert sessions == []
-    sqlite_db.put_ui_chat_state(
+    assert revision == 0
+    next_revision = sqlite_db.put_ui_chat_state(
         active_session_id="s_1",
+        base_revision=revision,
         sessions=[
             {
                 "id": "s_1",
@@ -156,10 +181,51 @@ def test_ui_chat_state_roundtrip(sqlite_db: SQLiteStore) -> None:
             }
         ],
     )
-    active, rows = sqlite_db.get_ui_chat_state()
+    assert next_revision == 1
+    active, rows, revision = sqlite_db.get_ui_chat_state()
     assert active == "s_1"
+    assert revision == 1
     assert len(rows) == 1
     assert rows[0]["id"] == "s_1"
     assert rows[0]["title"] == "hi"
     assert rows[0]["updatedAt"] == 42
     assert rows[0]["messages"][0]["content"] == "x"
+
+
+def test_ui_chat_state_rejects_stale_revision(sqlite_db: SQLiteStore) -> None:
+    sqlite_db.put_ui_chat_state(
+        active_session_id="s_1",
+        base_revision=0,
+        sessions=[
+            {
+                "id": "s_1",
+                "title": "first",
+                "updatedAt": 1,
+                "messages": [{"id": "m1", "role": "user", "content": "keep"}],
+                "lastEvidenceEntries": [],
+                "lastCitations": [],
+            }
+        ],
+    )
+
+    with pytest.raises(ChatStateRevisionConflict) as exc:
+        sqlite_db.put_ui_chat_state(
+            active_session_id="s_2",
+            base_revision=0,
+            sessions=[
+                {
+                    "id": "s_2",
+                    "title": "stale",
+                    "updatedAt": 2,
+                    "messages": [],
+                    "lastEvidenceEntries": [],
+                    "lastCitations": [],
+                }
+            ],
+        )
+
+    assert exc.value.current_revision == 1
+    active, rows, revision = sqlite_db.get_ui_chat_state()
+    assert active == "s_1"
+    assert revision == 1
+    assert rows[0]["messages"][0]["content"] == "keep"
