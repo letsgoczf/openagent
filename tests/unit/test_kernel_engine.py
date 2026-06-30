@@ -20,6 +20,7 @@ from backend.kernel.engine import KernelEngine
 from backend.rag.citation import Citation
 from backend.rag.evidence_builder import EvidenceEntry
 from backend.rag.service import RetrievalResult
+from backend.runners.chat_runner import ChatRunResult
 from backend.storage.sqlite_store import SQLiteStore
 
 
