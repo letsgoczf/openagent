@@ -111,6 +111,27 @@ def run_sequential_two_agent(
         },
     )
 
+    if ctx.budget.is_cancelled() or (
+        r1.degraded and r1.degrade_reason == "user_cancelled"
+    ):
+        trace.emit(
+            "merge_started",
+            {"strategy": "cancelled_after_analyst", "sub_agents": ["sub_analyst"]},
+        )
+        return ChatRunResult(
+            answer=r1.answer,
+            citations=r1.citations,
+            evidence_entries=r1.evidence_entries,
+            degraded=True,
+            run_id=ctx.run_id,
+            retrieval_state={
+                "multi_agent": True,
+                "analyst": r1.retrieval_state,
+            },
+            degrade_reason="user_cancelled",
+            thinking=r1.thinking,
+        )
+
     # ─── Phase 2: synthesizer ─────────────────────────────────────
     draft = (r1.answer or "").strip()
     if len(draft) > 12_000:
