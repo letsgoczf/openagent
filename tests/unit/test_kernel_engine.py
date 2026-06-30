@@ -6,6 +6,7 @@ from backend.config_loader import (
     EmbeddingConfig,
     EvidenceConfig,
     GenerationConfig,
+    MemoryConfig,
     ModelsConfig,
     OpenAgentSettings,
     RagConfig,
@@ -19,6 +20,7 @@ from backend.kernel.engine import KernelEngine
 from backend.rag.citation import Citation
 from backend.rag.evidence_builder import EvidenceEntry
 from backend.rag.service import RetrievalResult
+from backend.storage.sqlite_store import SQLiteStore
 
 
 def _settings_simple(tmp_path) -> OpenAgentSettings:
@@ -115,3 +117,49 @@ def test_engine_trace_events_sequence(
     assert "evidence_update" in types
     assert "completed" in types
     conn.close()
+
+
+def test_engine_does_not_persist_user_cancelled_turn(tmp_path) -> None:
+    settings = _settings_simple(tmp_path)
+    settings.memory = MemoryConfig(
+        enabled=True,
+        consolidation_enabled=False,
+        fragments_enabled=False,
+    )
+    sqlite = SQLiteStore(settings.storage.sqlite_path)
+
+    class CancelledRunner:
+        @property
+        def llm_adapter(self):
+            return MagicMock()
+
+        def run(self, *args, **kwargs) -> ChatRunResult:
+            return ChatRunResult(
+                answer="partial",
+                citations=[],
+                evidence_entries=[],
+                degraded=True,
+                run_id="run_cancel",
+                retrieval_state={},
+                degrade_reason="user_cancelled",
+            )
+
+    class FakeQdrant:
+        client = MagicMock()
+
+        def close(self) -> None:
+            pass
+
+    with patch(
+        "backend.kernel.engine.build_chat_runner",
+        return_value=(CancelledRunner(), sqlite, FakeQdrant()),
+    ):
+        result = KernelEngine(settings=settings).run_chat("stop me", session_id="s1")
+
+    assert result.degrade_reason == "user_cancelled"
+
+    check = SQLiteStore(settings.storage.sqlite_path)
+    try:
+        assert check.count_chat_session_turns("s1") == 0
+    finally:
+        check.close()

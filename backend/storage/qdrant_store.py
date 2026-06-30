@@ -25,6 +25,7 @@ class QdrantStore:
         client: QdrantClient | None = None,
         *,
         location: str | None = None,
+        owns_client: bool = False,
     ) -> None:
         self.collection_name = collection_name
         self.vector_size = vector_size
@@ -34,7 +35,7 @@ class QdrantStore:
             self._client = QdrantClient(location=location)
         else:
             self._client = QdrantClient(location=":memory:")
-        self._owns_client = client is None
+        self._owns_client = owns_client if client is not None else True
 
     @property
     def client(self) -> QdrantClient:
