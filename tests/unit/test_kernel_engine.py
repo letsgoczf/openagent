@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from unittest.mock import MagicMock, patch
 
 from backend.config_loader import (
@@ -155,10 +156,11 @@ def test_engine_skips_memory_write_for_cancelled_stream(
 
     settings = _settings_simple(tmp_path)
     eng = KernelEngine(settings=settings)
-    budget = Budget(max_llm_calls=3)
+    cancel_event = threading.Event()
+    budget = Budget(max_llm_calls=3, cancel_event=cancel_event)
 
     def cancel_after_first_chunk(_kind: str, _chunk: str) -> None:
-        budget.cancel()
+        cancel_event.set()
 
     out = eng.run_chat(
         "hello world",
