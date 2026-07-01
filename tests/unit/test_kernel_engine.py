@@ -6,6 +6,7 @@ from backend.config_loader import (
     EmbeddingConfig,
     EvidenceConfig,
     GenerationConfig,
+    MemoryConfig,
     ModelsConfig,
     OpenAgentSettings,
     RagConfig,
@@ -41,6 +42,11 @@ def _settings_simple(tmp_path) -> OpenAgentSettings:
         ),
         tokenization=TokenizationConfig(provider="auto"),
         evidence=EvidenceConfig(max_evidence_entry_tokens=100),
+        memory=MemoryConfig(
+            enabled=True,
+            consolidation_enabled=False,
+            fragments_enabled=False,
+        ),
         rag=RagConfig(
             recall=RagRecallConfig(
                 top_k_dense=2,
@@ -115,3 +121,69 @@ def test_engine_trace_events_sequence(
     assert "evidence_update" in types
     assert "completed" in types
     conn.close()
+
+
+@patch("backend.runners.chat_runner.embed_text", return_value=[1.0, 0.0, 0.0, 0.0])
+@patch("backend.runners.chat_runner.build_qdrant_client")
+@patch("backend.runners.chat_runner.create_llm_adapter")
+@patch("backend.runners.chat_runner.RetrievalService")
+def test_engine_skips_memory_write_for_cancelled_stream(
+    mock_rs_cls,
+    mock_factory,
+    mock_qclient,
+    _mock_embed,
+    tmp_path,
+) -> None:
+    mock_qclient.return_value = MagicMock()
+
+    def stream_reply():
+        yield ("content", "partial answer")
+        yield ("content", " should not be consumed")
+
+    mock_factory.return_value = MagicMock()
+    mock_factory.return_value.chat.return_value = stream_reply()
+
+    rr = RetrievalResult(
+        evidence_entries=[],
+        citations=[],
+        retrieval_state={"dense_hits": 0},
+        candidate_debug=None,
+    )
+    inst = MagicMock()
+    inst.retrieve.return_value = rr
+    mock_rs_cls.return_value = inst
+
+    settings = _settings_simple(tmp_path)
+    eng = KernelEngine(settings=settings)
+    budget = Budget(max_llm_calls=3)
+
+    def cancel_after_first_chunk(_kind: str, _chunk: str) -> None:
+        budget.cancel()
+
+    out = eng.run_chat(
+        "hello world",
+        session_id="session-cancelled",
+        budget=budget,
+        stream=True,
+        stream_writer=cancel_after_first_chunk,
+    )
+
+    assert out.degraded is True
+    assert out.degrade_reason == "user_cancelled"
+    assert out.answer == "partial answer"
+
+    import sqlite3
+
+    store_path = tmp_path / "engine.db"
+    conn = sqlite3.connect(str(store_path))
+    rows = conn.execute(
+        "SELECT role, content FROM chat_session_turn WHERE session_id = ?",
+        ("session-cancelled",),
+    ).fetchall()
+    skipped = conn.execute(
+        "SELECT event_type FROM trace_event WHERE event_type = 'memory_write_skipped'"
+    ).fetchall()
+    conn.close()
+
+    assert rows == []
+    assert len(skipped) == 1
