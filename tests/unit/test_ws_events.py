@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from backend.api.app import app
 from backend.rag.citation import Citation
@@ -90,3 +92,14 @@ def test_ws_chat_completed_answer_is_string() -> None:
                 break
         else:
             raise AssertionError("no chat.completed")
+
+
+def test_ws_rejects_untrusted_browser_origin() -> None:
+    client = TestClient(app)
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            "/ws",
+            headers={"origin": "https://evil.example.test"},
+        ):
+            pass

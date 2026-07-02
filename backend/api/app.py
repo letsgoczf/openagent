@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.api.origin_policy import get_allowed_origins
 from backend.api.routes.agent_templates import router as agent_templates_router
 from backend.api.routes.chat_sessions import router as chat_sessions_router
 from backend.api.routes.documents import router as documents_router
@@ -17,7 +18,7 @@ app = FastAPI(title="OpenAgent API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=get_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
