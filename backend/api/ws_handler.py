@@ -5,8 +5,9 @@ import json
 import threading
 from typing import Any
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
+from backend.api.origin_policy import is_allowed_origin
 from backend.kernel.budget import Budget
 from backend.kernel.engine import KernelEngine
 
@@ -35,6 +36,10 @@ def _normalize_answer_text(raw: Any) -> str:
 
 @ws_router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
+    if not is_allowed_origin(ws.headers.get("origin")):
+        await ws.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     await ws.accept()
 
     # Note: 本实现只支持单次连接串行处理（收到 chat.start 后，直到 chat.completed 才接收下一条）。
