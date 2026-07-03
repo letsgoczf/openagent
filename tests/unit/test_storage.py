@@ -5,7 +5,7 @@ import uuid
 import pytest
 
 from backend.storage.qdrant_store import QdrantStore
-from backend.storage.sqlite_store import SQLiteStore
+from backend.storage.sqlite_store import SQLiteStore, UIChatStateRevisionConflict
 
 
 @pytest.fixture
@@ -140,10 +140,11 @@ def test_qdrant_delete_by_version_ids() -> None:
 
 
 def test_ui_chat_state_roundtrip(sqlite_db: SQLiteStore) -> None:
-    active, sessions = sqlite_db.get_ui_chat_state()
+    active, sessions, revision = sqlite_db.get_ui_chat_state()
     assert active is None
     assert sessions == []
-    sqlite_db.put_ui_chat_state(
+    assert revision == 0
+    next_revision = sqlite_db.put_ui_chat_state(
         active_session_id="s_1",
         sessions=[
             {
@@ -155,11 +156,75 @@ def test_ui_chat_state_roundtrip(sqlite_db: SQLiteStore) -> None:
                 "lastCitations": [],
             }
         ],
+        base_revision=revision,
     )
-    active, rows = sqlite_db.get_ui_chat_state()
+    active, rows, revision = sqlite_db.get_ui_chat_state()
     assert active == "s_1"
+    assert next_revision == revision == 1
     assert len(rows) == 1
     assert rows[0]["id"] == "s_1"
     assert rows[0]["title"] == "hi"
     assert rows[0]["updatedAt"] == 42
     assert rows[0]["messages"][0]["content"] == "x"
+
+
+def test_ui_chat_state_rejects_stale_full_replace(sqlite_db: SQLiteStore) -> None:
+    _, _, base_revision = sqlite_db.get_ui_chat_state()
+    revision = sqlite_db.put_ui_chat_state(
+        active_session_id="s_1",
+        sessions=[
+            {
+                "id": "s_1",
+                "title": "first",
+                "updatedAt": 1,
+                "messages": [],
+                "lastEvidenceEntries": [],
+                "lastCitations": [],
+            }
+        ],
+        base_revision=base_revision,
+    )
+
+    sqlite_db.put_ui_chat_state(
+        active_session_id="s_2",
+        sessions=[
+            {
+                "id": "s_1",
+                "title": "first",
+                "updatedAt": 1,
+                "messages": [],
+                "lastEvidenceEntries": [],
+                "lastCitations": [],
+            },
+            {
+                "id": "s_2",
+                "title": "new in tab a",
+                "updatedAt": 2,
+                "messages": [],
+                "lastEvidenceEntries": [],
+                "lastCitations": [],
+            },
+        ],
+        base_revision=revision,
+    )
+
+    with pytest.raises(UIChatStateRevisionConflict):
+        sqlite_db.put_ui_chat_state(
+            active_session_id="s_1",
+            sessions=[
+                {
+                    "id": "s_1",
+                    "title": "stale tab b",
+                    "updatedAt": 3,
+                    "messages": [],
+                    "lastEvidenceEntries": [],
+                    "lastCitations": [],
+                }
+            ],
+            base_revision=revision,
+        )
+
+    active, rows, final_revision = sqlite_db.get_ui_chat_state()
+    assert active == "s_2"
+    assert final_revision == 2
+    assert {row["id"] for row in rows} == {"s_1", "s_2"}
