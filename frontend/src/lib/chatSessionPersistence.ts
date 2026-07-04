@@ -19,8 +19,10 @@ export interface ChatSessionPersisted {
 
 export interface ChatSessionsFile {
   version: number;
-  activeSessionId: string;
+  stateRevision: number;
+  activeSessionId: string | null;
   sessions: ChatSessionPersisted[];
+  baseRevision?: number;
 }
 
 function newSessionId(): string {
@@ -78,6 +80,7 @@ export function loadChatSessionsFile(): ChatSessionsFile | null {
     const activeOk = cleaned.some((x) => x.id === activeSessionId);
     return {
       version: CHAT_SESSIONS_VERSION,
+      stateRevision: 0,
       activeSessionId: activeOk ? activeSessionId : cleaned[0]!.id,
       sessions: cleaned,
     };
