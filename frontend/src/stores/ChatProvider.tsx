@@ -24,6 +24,7 @@ import {
   type ChatSessionPersisted,
 } from "@/lib/chatSessionPersistence";
 import {
+  ChatSessionsConflictError,
   fetchChatSessionsState,
   putChatSessionsState,
 } from "@/lib/chatSessionsApi";
@@ -138,6 +139,28 @@ function normalizeAnswerText(raw: unknown): string {
   return String(raw);
 }
 
+function mergeChatSessions(
+  remote: ChatSessionPersisted[],
+  local: ChatSessionPersisted[]
+): ChatSessionPersisted[] {
+  const byId = new Map(remote.map((s) => [s.id, s]));
+  for (const session of local) {
+    const existing = byId.get(session.id);
+    if (!existing || session.updatedAt >= existing.updatedAt) {
+      byId.set(session.id, session);
+    }
+  }
+  return Array.from(byId.values()).sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+function validActiveSessionId(
+  preferred: string | null,
+  sessions: ChatSessionPersisted[]
+): string | null {
+  if (preferred && sessions.some((s) => s.id === preferred)) return preferred;
+  return sessions[0]?.id ?? null;
+}
+
 export function ChatProvider({ children }: { children: React.ReactNode }) {
   const [sessions, setSessions] = useState<ChatSessionPersisted[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -161,6 +184,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const streamingSessionIdRef = useRef<string | null>(null);
   /** 与当前 WebSocket 轮次对齐，丢弃旧连接晚到的 chat.* 事件，避免污染新会话侧栏 */
   const activeRequestIdRef = useRef<string | null>(null);
+  const stateRevisionRef = useRef<number | null>(null);
   const persistSkipRef = useRef(true);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -174,6 +198,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       try {
         const remote = await fetchChatSessionsState();
         if (cancelled) return;
+        const remoteRevision = Number.isFinite(remote.stateRevision)
+          ? remote.stateRevision
+          : 0;
+        stateRevisionRef.current = remoteRevision;
         if (remote.sessions.length > 0) {
           const activeOk = remote.sessions.some(
             (s) => s.id === remote.activeSessionId
@@ -186,8 +214,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         } else {
           const legacy = loadChatSessionsFile();
           if (legacy && legacy.sessions.length > 0) {
-            await putChatSessionsState(legacy);
+            const saved = await putChatSessionsState({
+              ...legacy,
+              stateRevision: remoteRevision,
+              baseRevision: remoteRevision,
+            });
             if (cancelled) return;
+            stateRevisionRef.current = saved.stateRevision;
             clearLegacyChatSessionsStorage();
             setSessions(legacy.sessions);
             setActiveSessionId(legacy.activeSessionId);
@@ -196,8 +229,12 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             const initial: ChatSessionPersisted[] = [s];
             await putChatSessionsState({
               version: CHAT_SESSIONS_VERSION,
+              stateRevision: remoteRevision,
+              baseRevision: remoteRevision,
               activeSessionId: s.id,
               sessions: initial,
+            }).then((saved) => {
+              stateRevisionRef.current = saved.stateRevision;
             });
             if (cancelled) return;
             setSessions(initial);
@@ -212,6 +249,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
               ? e.message
               : "无法从服务器加载会话，请确认后端已启动且 API 地址正确"
           );
+          stateRevisionRef.current = null;
           const s = createEmptySession();
           setSessions([s]);
           setActiveSessionId(s.id);
@@ -232,6 +270,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     if (!sessionsReady || activeSessionId === null || sessions.length === 0) {
       return;
     }
+    if (stateRevisionRef.current === null) {
+      return;
+    }
     if (!sessions.some((s) => s.id === activeSessionId)) {
       return;
     }
@@ -242,12 +283,41 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
     persistTimerRef.current = setTimeout(() => {
       persistTimerRef.current = null;
+      const baseRevision = stateRevisionRef.current;
+      if (baseRevision === null) return;
       void putChatSessionsState({
         version: CHAT_SESSIONS_VERSION,
+        stateRevision: baseRevision,
+        baseRevision,
         activeSessionId,
         sessions,
-      }).catch((err) => {
-        console.error("chat sessions persist", err);
+      })
+        .then((saved) => {
+          stateRevisionRef.current = saved.stateRevision;
+        })
+        .catch(async (err) => {
+          if (err instanceof ChatSessionsConflictError) {
+            try {
+              const remote = await fetchChatSessionsState();
+              const remoteRevision = Number.isFinite(remote.stateRevision)
+                ? remote.stateRevision
+                : 0;
+              const merged = mergeChatSessions(remote.sessions, sessions);
+              const nextActive =
+                validActiveSessionId(activeSessionId, merged) ??
+                validActiveSessionId(remote.activeSessionId, merged);
+              stateRevisionRef.current = remoteRevision;
+              persistSkipRef.current = false;
+              setSessions(merged);
+              setActiveSessionId(nextActive);
+              activeSessionIdRef.current = nextActive;
+              setError("会话已在其他窗口更新，已合并最新状态。");
+              return;
+            } catch (mergeErr) {
+              console.error("chat sessions conflict merge", mergeErr);
+            }
+          }
+          console.error("chat sessions persist", err);
       });
     }, 450);
     return () => {

@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from backend.api.errors import ApiException
 from backend.config_loader import load_config
-from backend.storage.sqlite_store import SQLiteStore
+from backend.storage.sqlite_store import ChatSessionsStateConflictError, SQLiteStore
 
 router = APIRouter(prefix="/v1/chat-sessions", tags=["chat-sessions"])
 
@@ -25,8 +25,13 @@ class ChatSessionPersistedDTO(BaseModel):
 
 class ChatSessionsStateDTO(BaseModel):
     version: Literal[1] = 1
+    stateRevision: int = 0
     activeSessionId: str | None = None
     sessions: list[ChatSessionPersistedDTO]
+
+
+class ChatSessionsStateWriteDTO(ChatSessionsStateDTO):
+    baseRevision: int | None = None
 
 
 @router.get("/state", response_model=ChatSessionsStateDTO)
@@ -34,9 +39,10 @@ async def get_chat_sessions_state() -> ChatSessionsStateDTO:
     cfg = load_config()
     sqlite = SQLiteStore(cfg.storage.sqlite_path)
     try:
-        active, rows = sqlite.get_ui_chat_state()
+        revision, active, rows = sqlite.get_ui_chat_state()
         return ChatSessionsStateDTO(
             version=1,
+            stateRevision=revision,
             activeSessionId=active,
             sessions=[ChatSessionPersistedDTO.model_validate(s) for s in rows],
         )
@@ -45,21 +51,46 @@ async def get_chat_sessions_state() -> ChatSessionsStateDTO:
 
 
 @router.put("/state", response_model=dict)
-async def put_chat_sessions_state(body: ChatSessionsStateDTO) -> dict[str, bool]:
+async def put_chat_sessions_state(body: ChatSessionsStateWriteDTO) -> dict[str, bool | int]:
     if not body.sessions:
         raise ApiException(
             code="chat_sessions.empty",
             message="sessions must not be empty",
             status_code=400,
         )
-    ids = {s.id for s in body.sessions}
-    if len(ids) != len(body.sessions):
+    if body.baseRevision is None:
         raise ApiException(
-            code="chat_sessions.duplicate_id",
-            message="duplicate session id",
+            code="chat_sessions.missing_base_revision",
+            message="baseRevision is required to save chat sessions",
             status_code=400,
         )
-    active = body.activeSessionId
+    if body.baseRevision < 0:
+        raise ApiException(
+            code="chat_sessions.bad_base_revision",
+            message="baseRevision must be non-negative",
+            status_code=400,
+        )
+    rows: list[dict[str, Any]] = []
+    ids: set[str] = set()
+    for s in body.sessions:
+        sid = s.id.strip()
+        if not sid:
+            raise ApiException(
+                code="chat_sessions.bad_id",
+                message="session id must not be blank",
+                status_code=400,
+            )
+        if sid in ids:
+            raise ApiException(
+                code="chat_sessions.duplicate_id",
+                message="duplicate session id",
+                status_code=400,
+            )
+        ids.add(sid)
+        row = s.model_dump(mode="json")
+        row["id"] = sid
+        rows.append(row)
+    active = (body.activeSessionId or "").strip() or None
     if active and active not in ids:
         raise ApiException(
             code="chat_sessions.bad_active",
@@ -69,8 +100,21 @@ async def put_chat_sessions_state(body: ChatSessionsStateDTO) -> dict[str, bool]
     cfg = load_config()
     sqlite = SQLiteStore(cfg.storage.sqlite_path)
     try:
-        rows = [s.model_dump(mode="json") for s in body.sessions]
-        sqlite.put_ui_chat_state(active_session_id=active, sessions=rows)
-        return {"ok": True}
+        next_revision = sqlite.put_ui_chat_state(
+            active_session_id=active,
+            sessions=rows,
+            base_revision=body.baseRevision,
+        )
+        return {"ok": True, "stateRevision": next_revision}
+    except ChatSessionsStateConflictError as exc:
+        raise ApiException(
+            code="chat_sessions.revision_conflict",
+            message="chat sessions changed since they were loaded",
+            status_code=409,
+            detail={
+                "currentRevision": exc.current_revision,
+                "baseRevision": exc.base_revision,
+            },
+        ) from exc
     finally:
         sqlite.close()
