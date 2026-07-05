@@ -6,6 +6,7 @@ from backend.config_loader import (
     EmbeddingConfig,
     EvidenceConfig,
     GenerationConfig,
+    MemoryConfig,
     ModelsConfig,
     OpenAgentSettings,
     RagConfig,
@@ -41,6 +42,7 @@ def _settings_simple(tmp_path) -> OpenAgentSettings:
         ),
         tokenization=TokenizationConfig(provider="auto"),
         evidence=EvidenceConfig(max_evidence_entry_tokens=100),
+        memory=MemoryConfig(consolidation_enabled=False, fragments_enabled=False),
         rag=RagConfig(
             recall=RagRecallConfig(
                 top_k_dense=2,
@@ -115,3 +117,60 @@ def test_engine_trace_events_sequence(
     assert "evidence_update" in types
     assert "completed" in types
     conn.close()
+
+
+@patch("backend.runners.chat_runner.embed_text", return_value=[1.0, 0.0, 0.0, 0.0])
+@patch("backend.runners.chat_runner.build_qdrant_client")
+@patch("backend.runners.chat_runner.create_llm_adapter")
+@patch("backend.runners.chat_runner.RetrievalService")
+def test_engine_skips_memory_write_for_degraded_result(
+    mock_rs_cls,
+    mock_factory,
+    mock_qclient,
+    _mock_embed,
+    tmp_path,
+) -> None:
+    mock_qclient.return_value = MagicMock()
+    mock_factory.return_value = MagicMock()
+
+    rr = RetrievalResult(
+        evidence_entries=[],
+        citations=[],
+        retrieval_state={"dense_hits": 0},
+        candidate_debug=None,
+    )
+    inst = MagicMock()
+    inst.retrieve.return_value = rr
+    mock_rs_cls.return_value = inst
+
+    settings = _settings_simple(tmp_path)
+    eng = KernelEngine(settings=settings)
+
+    out = eng.run_chat(
+        "remember this partial answer",
+        session_id="sess_degraded",
+        budget=Budget(max_llm_calls=0),
+    )
+
+    assert out.degraded is True
+    assert out.degrade_reason == "llm_or_token_budget"
+
+    import sqlite3
+
+    store_path = tmp_path / "engine.db"
+    conn = sqlite3.connect(str(store_path))
+    turns = conn.execute(
+        "SELECT role, content FROM chat_session_turn WHERE session_id = ?",
+        ("sess_degraded",),
+    ).fetchall()
+    event_types = [
+        row[0]
+        for row in conn.execute(
+            "SELECT event_type FROM trace_event ORDER BY sequence_num"
+        ).fetchall()
+    ]
+    conn.close()
+
+    assert turns == []
+    assert "memory_write" not in event_types
+    assert "memory_write_skipped" in event_types

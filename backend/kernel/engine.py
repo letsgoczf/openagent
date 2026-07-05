@@ -245,7 +245,15 @@ class KernelEngine:
                     rolling_summary=rolling_summary,
                     reconstructed_memory=reconstructed_memory,
                 )
-            if self.settings.memory.enabled:
+            if self.settings.memory.enabled and result.degraded:
+                trace.emit(
+                    "memory_write_skipped",
+                    {
+                        "session_id": sid,
+                        "reason": result.degrade_reason or "degraded_result",
+                    },
+                )
+            elif self.settings.memory.enabled:
                 body = strip_citations_footer_from_answer(result.answer)
                 trace.emit(
                     "memory_write",
