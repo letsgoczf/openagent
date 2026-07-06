@@ -19,6 +19,8 @@ export interface ChatSessionPersisted {
 
 export interface ChatSessionsFile {
   version: number;
+  stateRevision?: number;
+  baseRevision?: number;
   activeSessionId: string;
   sessions: ChatSessionPersisted[];
 }
