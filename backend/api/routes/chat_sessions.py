@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from backend.api.errors import ApiException
 from backend.config_loader import load_config
-from backend.storage.sqlite_store import SQLiteStore
+from backend.storage.sqlite_store import SQLiteStore, UIChatStateConflictError
 
 router = APIRouter(prefix="/v1/chat-sessions", tags=["chat-sessions"])
 
@@ -25,6 +25,14 @@ class ChatSessionPersistedDTO(BaseModel):
 
 class ChatSessionsStateDTO(BaseModel):
     version: Literal[1] = 1
+    stateRevision: int = 0
+    activeSessionId: str | None = None
+    sessions: list[ChatSessionPersistedDTO]
+
+
+class ChatSessionsStatePutDTO(BaseModel):
+    version: Literal[1] = 1
+    baseRevision: int | None = None
     activeSessionId: str | None = None
     sessions: list[ChatSessionPersistedDTO]
 
@@ -34,9 +42,10 @@ async def get_chat_sessions_state() -> ChatSessionsStateDTO:
     cfg = load_config()
     sqlite = SQLiteStore(cfg.storage.sqlite_path)
     try:
-        active, rows = sqlite.get_ui_chat_state()
+        active, rows, revision = sqlite.get_ui_chat_state()
         return ChatSessionsStateDTO(
             version=1,
+            stateRevision=revision,
             activeSessionId=active,
             sessions=[ChatSessionPersistedDTO.model_validate(s) for s in rows],
         )
@@ -45,7 +54,7 @@ async def get_chat_sessions_state() -> ChatSessionsStateDTO:
 
 
 @router.put("/state", response_model=dict)
-async def put_chat_sessions_state(body: ChatSessionsStateDTO) -> dict[str, bool]:
+async def put_chat_sessions_state(body: ChatSessionsStatePutDTO) -> dict[str, bool | int]:
     if not body.sessions:
         raise ApiException(
             code="chat_sessions.empty",
@@ -66,11 +75,31 @@ async def put_chat_sessions_state(body: ChatSessionsStateDTO) -> dict[str, bool]
             message="activeSessionId must refer to an existing session",
             status_code=400,
         )
+    if body.baseRevision is None:
+        raise ApiException(
+            code="chat_sessions.missing_base_revision",
+            message="baseRevision is required to save chat sessions",
+            status_code=400,
+        )
     cfg = load_config()
     sqlite = SQLiteStore(cfg.storage.sqlite_path)
     try:
         rows = [s.model_dump(mode="json") for s in body.sessions]
-        sqlite.put_ui_chat_state(active_session_id=active, sessions=rows)
-        return {"ok": True}
+        next_revision = sqlite.put_ui_chat_state(
+            active_session_id=active,
+            sessions=rows,
+            base_revision=body.baseRevision,
+        )
+        return {"ok": True, "stateRevision": next_revision}
+    except UIChatStateConflictError as e:
+        raise ApiException(
+            code="chat_sessions.revision_conflict",
+            message="chat sessions changed on the server; reload before saving",
+            status_code=409,
+            detail={
+                "currentRevision": e.current_revision,
+                "baseRevision": e.base_revision,
+            },
+        ) from e
     finally:
         sqlite.close()
