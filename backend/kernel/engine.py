@@ -246,7 +246,21 @@ class KernelEngine:
                     reconstructed_memory=reconstructed_memory,
                 )
             if self.settings.memory.enabled:
-                body = strip_citations_footer_from_answer(result.answer)
+                body = strip_citations_footer_from_answer(result.answer).strip()
+                skip_reason: str | None = None
+                if result.degraded:
+                    skip_reason = result.degrade_reason or "degraded"
+                elif not body:
+                    skip_reason = "empty_assistant"
+                if skip_reason is not None:
+                    trace.emit(
+                        "memory_write_skipped",
+                        {
+                            "session_id": sid,
+                            "reason": skip_reason,
+                        },
+                    )
+                    return result
                 trace.emit(
                     "memory_write",
                     {

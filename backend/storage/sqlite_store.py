@@ -8,6 +8,10 @@ from typing import Any
 from backend.storage.schema import apply_schema
 
 
+class UiChatStateConflictError(RuntimeError):
+    """Raised when a UI chat state write is based on a stale revision."""
+
+
 class SQLiteStore:
     """SQLite persistence for documents, chunks (with FTS5), page_stats, trace_event."""
 
@@ -485,8 +489,18 @@ class SQLiteStore:
 
     # --- 前端 Chat UI 会话（整会话 JSON 快照，与 localStorage 结构对齐）---
 
-    def get_ui_chat_state(self) -> tuple[str | None, list[dict[str, Any]]]:
-        """返回 (active_session_id 或 None, sessions 列表，结构与前端 ChatSessionPersisted 一致)。"""
+    def _get_ui_chat_state_revision(self) -> int:
+        row = self._conn.execute(
+            "SELECT value FROM ui_preferences WHERE key = ?",
+            ("ui_chat_state_revision",),
+        ).fetchone()
+        try:
+            return max(0, int((row["value"] if row else "0") or "0"))
+        except (TypeError, ValueError):
+            return 0
+
+    def get_ui_chat_state(self) -> tuple[str | None, list[dict[str, Any]], int]:
+        """返回 (active_session_id 或 None, sessions 列表, state_revision)。"""
         row = self._conn.execute(
             "SELECT value FROM ui_preferences WHERE key = ?",
             ("active_chat_session_id",),
@@ -516,17 +530,24 @@ class SQLiteStore:
                     "lastCitations": payload.get("lastCitations") or [],
                 }
             )
-        return active, sessions
+        return active, sessions, self._get_ui_chat_state_revision()
 
     def put_ui_chat_state(
         self,
         *,
         active_session_id: str | None,
         sessions: list[dict[str, Any]],
-    ) -> None:
-        """全量替换 UI 会话表（单用户；事务）。"""
-        self._conn.execute("BEGIN")
+        expected_revision: int,
+    ) -> int:
+        """全量替换 UI 会话表；用修订号拒绝旧快照覆盖新状态。"""
+        self._conn.execute("BEGIN IMMEDIATE")
         try:
+            current_revision = self._get_ui_chat_state_revision()
+            if int(expected_revision) != current_revision:
+                raise UiChatStateConflictError(
+                    f"stale UI chat state revision: expected {expected_revision}, current {current_revision}"
+                )
+            next_revision = current_revision + 1
             self._conn.execute("DELETE FROM ui_chat_session")
             for s in sessions:
                 sid = str(s.get("id") or "").strip()
@@ -553,7 +574,15 @@ class SQLiteStore:
                 """,
                 ("active_chat_session_id", active_session_id or ""),
             )
+            self._conn.execute(
+                """
+                INSERT INTO ui_preferences (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                ("ui_chat_state_revision", str(next_revision)),
+            )
             self._conn.commit()
+            return next_revision
         except Exception:
             self._conn.rollback()
             raise

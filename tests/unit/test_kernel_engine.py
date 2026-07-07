@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
+import threading
 
 from backend.config_loader import (
     EmbeddingConfig,
     EvidenceConfig,
     GenerationConfig,
+    MemoryConfig,
     ModelsConfig,
     OpenAgentSettings,
     RagConfig,
@@ -49,6 +51,11 @@ def _settings_simple(tmp_path) -> OpenAgentSettings:
                 rerank_top_n=2,
             ),
             rerank=RagRerankConfig(strategy="merged_score"),
+        ),
+        memory=MemoryConfig(
+            enabled=True,
+            consolidation_enabled=False,
+            fragments_enabled=False,
         ),
     )
 
@@ -115,3 +122,55 @@ def test_engine_trace_events_sequence(
     assert "evidence_update" in types
     assert "completed" in types
     conn.close()
+
+
+@patch("backend.runners.chat_runner.embed_text", return_value=[1.0, 0.0, 0.0, 0.0])
+@patch("backend.runners.chat_runner.build_qdrant_client")
+@patch("backend.runners.chat_runner.create_llm_adapter")
+@patch("backend.runners.chat_runner.RetrievalService")
+def test_engine_does_not_persist_cancelled_turn(
+    mock_rs_cls,
+    mock_factory,
+    mock_qclient,
+    _mock_embed,
+    tmp_path,
+) -> None:
+    mock_qclient.return_value = MagicMock()
+    mock_factory.return_value = MagicMock()
+
+    inst = MagicMock()
+    inst.retrieve.return_value = RetrievalResult(
+        evidence_entries=[],
+        citations=[],
+        retrieval_state={"dense_hits": 0},
+        candidate_debug=None,
+    )
+    mock_rs_cls.return_value = inst
+
+    cancel_event = threading.Event()
+    cancel_event.set()
+    settings = _settings_simple(tmp_path)
+    eng = KernelEngine(settings=settings)
+    out = eng.run_chat(
+        "please stop",
+        session_id="sess_cancel",
+        budget=Budget(max_llm_calls=3, cancel_event=cancel_event),
+    )
+
+    assert out.degraded is True
+    assert out.degrade_reason == "user_cancelled"
+
+    import sqlite3
+
+    conn = sqlite3.connect(str(tmp_path / "engine.db"))
+    rows = conn.execute(
+        "SELECT role, content FROM chat_session_turn WHERE session_id = ?",
+        ("sess_cancel",),
+    ).fetchall()
+    events = conn.execute(
+        "SELECT event_type FROM trace_event ORDER BY sequence_num"
+    ).fetchall()
+    conn.close()
+
+    assert rows == []
+    assert "memory_write_skipped" in [r[0] for r in events]
