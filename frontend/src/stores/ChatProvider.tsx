@@ -24,6 +24,7 @@ import {
   type ChatSessionPersisted,
 } from "@/lib/chatSessionPersistence";
 import {
+  ChatSessionsApiError,
   fetchChatSessionsState,
   putChatSessionsState,
 } from "@/lib/chatSessionsApi";
@@ -138,6 +139,21 @@ function normalizeAnswerText(raw: unknown): string {
   return String(raw);
 }
 
+function mergeSessionsByUpdatedAt(
+  local: ChatSessionPersisted[],
+  remote: ChatSessionPersisted[]
+): ChatSessionPersisted[] {
+  const byId = new Map<string, ChatSessionPersisted>();
+  for (const s of remote) byId.set(s.id, s);
+  for (const s of local) {
+    const existing = byId.get(s.id);
+    if (!existing || s.updatedAt >= existing.updatedAt) {
+      byId.set(s.id, s);
+    }
+  }
+  return [...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
 export function ChatProvider({ children }: { children: React.ReactNode }) {
   const [sessions, setSessions] = useState<ChatSessionPersisted[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -163,6 +179,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const activeRequestIdRef = useRef<string | null>(null);
   const persistSkipRef = useRef(true);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stateRevisionRef = useRef(0);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -174,6 +191,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       try {
         const remote = await fetchChatSessionsState();
         if (cancelled) return;
+        stateRevisionRef.current = remote.stateRevision ?? 0;
         if (remote.sessions.length > 0) {
           const activeOk = remote.sessions.some(
             (s) => s.id === remote.activeSessionId
@@ -186,20 +204,27 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         } else {
           const legacy = loadChatSessionsFile();
           if (legacy && legacy.sessions.length > 0) {
-            await putChatSessionsState(legacy);
+            const saved = await putChatSessionsState({
+              ...legacy,
+              baseRevision: stateRevisionRef.current,
+            });
             if (cancelled) return;
+            stateRevisionRef.current = saved.stateRevision;
             clearLegacyChatSessionsStorage();
             setSessions(legacy.sessions);
             setActiveSessionId(legacy.activeSessionId);
           } else {
             const s = createEmptySession();
             const initial: ChatSessionPersisted[] = [s];
-            await putChatSessionsState({
+            const saved = await putChatSessionsState({
               version: CHAT_SESSIONS_VERSION,
               activeSessionId: s.id,
+              stateRevision: stateRevisionRef.current,
+              baseRevision: stateRevisionRef.current,
               sessions: initial,
             });
             if (cancelled) return;
+            stateRevisionRef.current = saved.stateRevision;
             setSessions(initial);
             setActiveSessionId(s.id);
           }
@@ -245,8 +270,35 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       void putChatSessionsState({
         version: CHAT_SESSIONS_VERSION,
         activeSessionId,
+        stateRevision: stateRevisionRef.current,
+        baseRevision: stateRevisionRef.current,
         sessions,
-      }).catch((err) => {
+      }).then((saved) => {
+        stateRevisionRef.current = saved.stateRevision;
+      }).catch(async (err) => {
+        if (err instanceof ChatSessionsApiError && err.status === 409) {
+          try {
+            const remote = await fetchChatSessionsState();
+            stateRevisionRef.current = remote.stateRevision ?? 0;
+            const merged = mergeSessionsByUpdatedAt(sessions, remote.sessions);
+            const activeOk =
+              activeSessionId !== null && merged.some((s) => s.id === activeSessionId);
+            const remoteActiveOk =
+              remote.activeSessionId !== null &&
+              merged.some((s) => s.id === remote.activeSessionId);
+            setSessions(merged);
+            setActiveSessionId(
+              activeOk
+                ? activeSessionId
+                : remoteActiveOk
+                  ? remote.activeSessionId
+                  : merged[0]?.id ?? null
+            );
+            return;
+          } catch (reloadErr) {
+            console.error("chat sessions conflict reload", reloadErr);
+          }
+        }
         console.error("chat sessions persist", err);
       });
     }, 450);

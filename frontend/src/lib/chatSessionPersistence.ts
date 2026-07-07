@@ -19,7 +19,9 @@ export interface ChatSessionPersisted {
 
 export interface ChatSessionsFile {
   version: number;
-  activeSessionId: string;
+  activeSessionId: string | null;
+  stateRevision: number;
+  baseRevision?: number;
   sessions: ChatSessionPersisted[];
 }
 
@@ -79,6 +81,7 @@ export function loadChatSessionsFile(): ChatSessionsFile | null {
     return {
       version: CHAT_SESSIONS_VERSION,
       activeSessionId: activeOk ? activeSessionId : cleaned[0]!.id,
+      stateRevision: 0,
       sessions: cleaned,
     };
   } catch {
