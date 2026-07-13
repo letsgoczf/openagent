@@ -245,8 +245,8 @@ class KernelEngine:
                     rolling_summary=rolling_summary,
                     reconstructed_memory=reconstructed_memory,
                 )
-            if self.settings.memory.enabled:
-                body = strip_citations_footer_from_answer(result.answer)
+            body = strip_citations_footer_from_answer(result.answer)
+            if self.settings.memory.enabled and not result.degraded and body.strip():
                 trace.emit(
                     "memory_write",
                     {

@@ -8,6 +8,9 @@ from typing import Any
 from backend.storage.schema import apply_schema
 
 
+RETRIEVABLE_VERSION_STATUSES = ("completed", "ready")
+
+
 class SQLiteStore:
     """SQLite persistence for documents, chunks (with FTS5), page_stats, trace_event."""
 
@@ -128,6 +131,7 @@ class SQLiteStore:
         origin_types: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Keyword search over chunk_text; bm25 score (lower is better). Optional version / origin filter."""
+        status_placeholders = ",".join("?" * len(RETRIEVABLE_VERSION_STATUSES))
         cond_version = ""
         cond_origin = ""
         extra_args: list[Any] = []
@@ -144,11 +148,17 @@ class SQLiteStore:
             SELECT c.chunk_id, bm25(chunk_fts) AS score
             FROM chunk_fts
             JOIN chunk c ON c.rowid = chunk_fts.rowid
-            WHERE chunk_fts MATCH ?{cond_version}{cond_origin}
+            JOIN document_version v ON v.version_id = c.version_id
+            WHERE chunk_fts MATCH ?
+                AND v.status IN ({status_placeholders})
+                {cond_version}{cond_origin}
             ORDER BY score
             LIMIT ?
         """
-        cur = self._conn.execute(sql, (query, *extra_args, limit))
+        cur = self._conn.execute(
+            sql,
+            (query, *RETRIEVABLE_VERSION_STATUSES, *extra_args, limit),
+        )
         return [{"chunk_id": r["chunk_id"], "score": r["score"]} for r in cur.fetchall()]
 
     def get_chunks_by_ids(self, chunk_ids: list[str]) -> dict[str, dict[str, Any]]:
@@ -319,6 +329,32 @@ class SQLiteStore:
             ORDER BY rowid ASC
             """,
             (doc_id,),
+        ).fetchall()
+        return [str(r["version_id"]) for r in rows]
+
+    def list_retrievable_version_ids(
+        self,
+        version_ids: list[str] | None = None,
+    ) -> list[str]:
+        if version_ids is not None and not version_ids:
+            return []
+
+        status_placeholders = ",".join("?" * len(RETRIEVABLE_VERSION_STATUSES))
+        cond_version = ""
+        args: list[Any] = list(RETRIEVABLE_VERSION_STATUSES)
+        if version_ids is not None:
+            placeholders = ",".join("?" * len(version_ids))
+            cond_version = f" AND version_id IN ({placeholders})"
+            args.extend(version_ids)
+
+        rows = self._conn.execute(
+            f"""
+            SELECT version_id
+            FROM document_version
+            WHERE status IN ({status_placeholders}){cond_version}
+            ORDER BY rowid ASC
+            """,
+            args,
         ).fetchall()
         return [str(r["version_id"]) for r in rows]
 

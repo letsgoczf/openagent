@@ -218,6 +218,88 @@ def test_retrieval_candidate_debug_flag(tmp_path) -> None:
     qd.close()
 
 
+def test_retrieval_uses_only_retrievable_versions(tmp_path) -> None:
+    db = tmp_path / "status.db"
+    store = SQLiteStore(db)
+    doc_id = str(uuid.uuid4())
+    completed_ver = str(uuid.uuid4())
+    failed_ver = str(uuid.uuid4())
+    completed_chunk = str(uuid.uuid4())
+    failed_chunk = str(uuid.uuid4())
+    store.insert_document(doc_id, "/x", "x.pdf", "pdf")
+    store.insert_document_version(completed_ver, doc_id, "h1", "ev1", "tok", "completed")
+    store.insert_document_version(failed_ver, doc_id, "h2", "ev1", "tok", "failed")
+    store.insert_chunk(
+        completed_chunk,
+        completed_ver,
+        "text",
+        0,
+        "alpha completed",
+        {"page_number": 1},
+        page_number=1,
+    )
+    store.insert_chunk(
+        failed_chunk,
+        failed_ver,
+        "text",
+        1,
+        "alpha failed",
+        {"page_number": 2},
+        page_number=2,
+    )
+    qd = QdrantStore("status", vector_size=4, location=":memory:")
+    qd.ensure_collection()
+    vec = [1.0, 0.0, 0.0, 0.0]
+    for chunk_id, version_id in (
+        (completed_chunk, completed_ver),
+        (failed_chunk, failed_ver),
+    ):
+        qd.upsert_embedding(
+            vec,
+            chunk_id=chunk_id,
+            version_id=version_id,
+            origin_type="text",
+            unit_type="page",
+            unit_number=1,
+        )
+
+    svc = RetrievalService(store, qd, TokenizerService(model_id="gpt-4"), settings=_settings())
+    out = svc.retrieve("alpha", vec, version_scope=[completed_ver, failed_ver])
+    assert [e.chunk_id for e in out.evidence_entries] == [completed_chunk]
+    assert out.retrieval_state["retrievable_version_scope_count"] == 1
+    store.close()
+    qd.close()
+
+
+def test_retrieval_falls_back_to_keyword_when_dense_fails(tmp_path) -> None:
+    db = tmp_path / "dense-fail.db"
+    store = SQLiteStore(db)
+    doc_id = str(uuid.uuid4())
+    ver_id = str(uuid.uuid4())
+    chunk_id = str(uuid.uuid4())
+    store.insert_document(doc_id, "/x", "x.pdf", "pdf")
+    store.insert_document_version(ver_id, doc_id, "h", "ev1", "tok", "ready")
+    store.insert_chunk(
+        chunk_id,
+        ver_id,
+        "text",
+        0,
+        "fallbackneedle survives dense failure",
+        {"page_number": 1},
+        page_number=1,
+    )
+    qd = Mock()
+    qd.search.side_effect = RuntimeError("qdrant down")
+    qd.collection_name = "c"
+    svc = RetrievalService(store, qd, TokenizerService(model_id="gpt-4"), settings=_settings())
+
+    out = svc.retrieve("fallbackneedle", [1.0, 0.0, 0.0, 0.0])
+
+    assert [e.chunk_id for e in out.evidence_entries] == [chunk_id]
+    assert out.retrieval_state["dense_recall_error"] == "qdrant down"
+    store.close()
+
+
 def test_truncate_respects_budget() -> None:
     tok = TokenizerService(encoding_name="cl100k_base")
     t = "hello " * 100
