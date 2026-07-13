@@ -49,6 +49,41 @@ def test_sqlite_fts5_returns_chunk_id(sqlite_db: SQLiteStore) -> None:
     assert any(h["chunk_id"] == chunk_id for h in hits)
 
 
+def test_sqlite_fts5_excludes_unretrievable_versions(sqlite_db: SQLiteStore) -> None:
+    doc_id = str(uuid.uuid4())
+    ready_ver = str(uuid.uuid4())
+    failed_ver = str(uuid.uuid4())
+    ready_chunk = str(uuid.uuid4())
+    failed_chunk = str(uuid.uuid4())
+    sqlite_db.insert_document(doc_id, "/tmp/x.pdf", "x.pdf", "pdf")
+    sqlite_db.insert_document_version(ready_ver, doc_id, "h1", "ext-v1", "tok", "ready")
+    sqlite_db.insert_document_version(failed_ver, doc_id, "h2", "ext-v1", "tok", "failed")
+    sqlite_db.insert_chunk(
+        ready_chunk,
+        ready_ver,
+        "text",
+        0,
+        "sharedneedle good",
+        {"page_number": 1},
+        page_number=1,
+    )
+    sqlite_db.insert_chunk(
+        failed_chunk,
+        failed_ver,
+        "text",
+        1,
+        "sharedneedle bad",
+        {"page_number": 2},
+        page_number=2,
+    )
+
+    hits = sqlite_db.query_fts5("sharedneedle", limit=10)
+    ids = {h["chunk_id"] for h in hits}
+    assert ready_chunk in ids
+    assert failed_chunk not in ids
+    assert sqlite_db.list_retrievable_version_ids([ready_ver, failed_ver]) == [ready_ver]
+
+
 def test_list_document_summaries(sqlite_db: SQLiteStore) -> None:
     _seed_doc(sqlite_db, "doc body")
     rows = sqlite_db.list_document_summaries()

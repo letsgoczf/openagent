@@ -111,6 +111,13 @@ def run_sequential_two_agent(
         },
     )
 
+    if ctx.budget.is_cancelled() or r1.degrade_reason == "user_cancelled":
+        trace.emit(
+            "merge_started",
+            {"strategy": "cancelled_after_analyst", "sub_agents": ["sub_analyst"]},
+        )
+        return r1
+
     # ─── Phase 2: synthesizer ─────────────────────────────────────
     draft = (r1.answer or "").strip()
     if len(draft) > 12_000:

@@ -19,6 +19,8 @@ from backend.kernel.engine import KernelEngine
 from backend.rag.citation import Citation
 from backend.rag.evidence_builder import EvidenceEntry
 from backend.rag.service import RetrievalResult
+from backend.runners.chat_runner import ChatRunResult
+from backend.storage.sqlite_store import SQLiteStore
 
 
 def _settings_simple(tmp_path) -> OpenAgentSettings:
@@ -115,3 +117,35 @@ def test_engine_trace_events_sequence(
     assert "evidence_update" in types
     assert "completed" in types
     conn.close()
+
+
+def test_engine_skips_memory_write_for_degraded_result(tmp_path) -> None:
+    settings = _settings_simple(tmp_path)
+    settings.memory.consolidation_enabled = False
+    settings.memory.fragments_enabled = False
+
+    sqlite = SQLiteStore(tmp_path / "degraded.db")
+    runner = MagicMock()
+    runner.llm_adapter = MagicMock()
+    runner.run.return_value = ChatRunResult(
+        answer="[LLM error: boom]",
+        citations=[],
+        evidence_entries=[],
+        degraded=True,
+        run_id="run-degraded",
+        retrieval_state={},
+        degrade_reason="llm_error:boom",
+    )
+    qdrant = MagicMock()
+    qdrant.client = MagicMock()
+
+    with patch("backend.kernel.engine.build_chat_runner", return_value=(runner, sqlite, qdrant)):
+        out = KernelEngine(settings=settings).run_chat("remember this", session_id="s1")
+
+    assert out.degraded is True
+
+    check = SQLiteStore(tmp_path / "degraded.db")
+    try:
+        assert check.count_chat_session_turns("s1") == 0
+    finally:
+        check.close()
