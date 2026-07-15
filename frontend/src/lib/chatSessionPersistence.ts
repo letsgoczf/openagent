@@ -23,6 +23,12 @@ export interface ChatSessionsFile {
   sessions: ChatSessionPersisted[];
 }
 
+export interface ChatSessionsState
+  extends Omit<ChatSessionsFile, "activeSessionId"> {
+  activeSessionId: string | null;
+  stateRevision: number;
+}
+
 function newSessionId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return `s_${crypto.randomUUID()}`;

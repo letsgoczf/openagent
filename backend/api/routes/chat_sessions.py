@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from backend.api.errors import ApiException
 from backend.config_loader import load_config
-from backend.storage.sqlite_store import SQLiteStore
+from backend.storage.sqlite_store import SQLiteStore, UIChatStateConflict
 
 router = APIRouter(prefix="/v1/chat-sessions", tags=["chat-sessions"])
 
@@ -27,6 +27,14 @@ class ChatSessionsStateDTO(BaseModel):
     version: Literal[1] = 1
     activeSessionId: str | None = None
     sessions: list[ChatSessionPersistedDTO]
+    stateRevision: int = Field(default=0, ge=0)
+
+
+class ChatSessionsPutDTO(BaseModel):
+    version: Literal[1] = 1
+    activeSessionId: str | None = None
+    sessions: list[ChatSessionPersistedDTO]
+    baseRevision: int = Field(ge=0)
 
 
 @router.get("/state", response_model=ChatSessionsStateDTO)
@@ -34,18 +42,19 @@ async def get_chat_sessions_state() -> ChatSessionsStateDTO:
     cfg = load_config()
     sqlite = SQLiteStore(cfg.storage.sqlite_path)
     try:
-        active, rows = sqlite.get_ui_chat_state()
+        active, rows, revision = sqlite.get_ui_chat_state()
         return ChatSessionsStateDTO(
             version=1,
             activeSessionId=active,
             sessions=[ChatSessionPersistedDTO.model_validate(s) for s in rows],
+            stateRevision=revision,
         )
     finally:
         sqlite.close()
 
 
 @router.put("/state", response_model=dict)
-async def put_chat_sessions_state(body: ChatSessionsStateDTO) -> dict[str, bool]:
+async def put_chat_sessions_state(body: ChatSessionsPutDTO) -> dict[str, bool | int]:
     if not body.sessions:
         raise ApiException(
             code="chat_sessions.empty",
@@ -70,7 +79,19 @@ async def put_chat_sessions_state(body: ChatSessionsStateDTO) -> dict[str, bool]
     sqlite = SQLiteStore(cfg.storage.sqlite_path)
     try:
         rows = [s.model_dump(mode="json") for s in body.sessions]
-        sqlite.put_ui_chat_state(active_session_id=active, sessions=rows)
-        return {"ok": True}
+        try:
+            revision = sqlite.put_ui_chat_state(
+                active_session_id=active,
+                sessions=rows,
+                base_revision=body.baseRevision,
+            )
+        except UIChatStateConflict as exc:
+            raise ApiException(
+                code="chat_sessions.conflict",
+                message="chat sessions state changed since it was loaded",
+                status_code=409,
+                detail={"currentRevision": exc.actual_revision},
+            ) from exc
+        return {"ok": True, "stateRevision": revision}
     finally:
         sqlite.close()
