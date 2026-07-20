@@ -6,6 +6,7 @@ from backend.config_loader import (
     EmbeddingConfig,
     EvidenceConfig,
     GenerationConfig,
+    MemoryConfig,
     ModelsConfig,
     OpenAgentSettings,
     RagConfig,
@@ -41,6 +42,11 @@ def _settings_simple(tmp_path) -> OpenAgentSettings:
         ),
         tokenization=TokenizationConfig(provider="auto"),
         evidence=EvidenceConfig(max_evidence_entry_tokens=100),
+        memory=MemoryConfig(
+            enabled=True,
+            consolidation_enabled=False,
+            fragments_enabled=False,
+        ),
         rag=RagConfig(
             recall=RagRecallConfig(
                 top_k_dense=2,
@@ -114,4 +120,59 @@ def test_engine_trace_events_sequence(
     assert "retrieval_update" in types
     assert "evidence_update" in types
     assert "completed" in types
+    assert "memory_write" in types
+    assert conn.execute(
+        "SELECT COUNT(*) FROM chat_session_turn"
+    ).fetchone()[0] == 2
+    conn.close()
+
+
+@patch("backend.runners.chat_runner.embed_text", return_value=[1.0, 0.0, 0.0, 0.0])
+@patch("backend.runners.chat_runner.build_qdrant_client")
+@patch("backend.runners.chat_runner.create_llm_adapter")
+@patch("backend.runners.chat_runner.RetrievalService")
+def test_engine_does_not_persist_degraded_turn(
+    mock_rs_cls,
+    mock_factory,
+    mock_qclient,
+    _mock_embed,
+    tmp_path,
+) -> None:
+    mock_qclient.return_value = MagicMock()
+    mock_factory.return_value = MagicMock()
+    mock_factory.return_value.chat.side_effect = RuntimeError("provider unavailable")
+
+    inst = MagicMock()
+    inst.retrieve.return_value = RetrievalResult(
+        evidence_entries=[],
+        citations=[],
+        retrieval_state={"dense_hits": 0},
+        candidate_debug=None,
+    )
+    mock_rs_cls.return_value = inst
+
+    settings = _settings_simple(tmp_path)
+    out = KernelEngine(settings=settings).run_chat(
+        "do not remember this failed turn",
+        session_id="failed-session",
+        budget=Budget(max_llm_calls=3),
+    )
+
+    assert out.degraded is True
+
+    import sqlite3
+
+    conn = sqlite3.connect(str(tmp_path / "engine.db"))
+    assert conn.execute(
+        "SELECT COUNT(*) FROM chat_session_turn WHERE session_id = ?",
+        ("failed-session",),
+    ).fetchone()[0] == 0
+    event_types = [
+        row[0]
+        for row in conn.execute(
+            "SELECT event_type FROM trace_event ORDER BY sequence_num"
+        ).fetchall()
+    ]
+    assert "memory_write_skipped" in event_types
+    assert "memory_write" not in event_types
     conn.close()
