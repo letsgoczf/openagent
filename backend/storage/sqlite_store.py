@@ -8,6 +8,14 @@ from typing import Any
 from backend.storage.schema import apply_schema
 
 
+class ChatStateConflictError(Exception):
+    """Raised when a UI chat state write is based on a stale revision."""
+
+    def __init__(self, current_revision: int) -> None:
+        super().__init__(f"stale UI chat state revision; current revision is {current_revision}")
+        self.current_revision = current_revision
+
+
 class SQLiteStore:
     """SQLite persistence for documents, chunks (with FTS5), page_stats, trace_event."""
 
@@ -485,48 +493,69 @@ class SQLiteStore:
 
     # --- 前端 Chat UI 会话（整会话 JSON 快照，与 localStorage 结构对齐）---
 
-    def get_ui_chat_state(self) -> tuple[str | None, list[dict[str, Any]]]:
-        """返回 (active_session_id 或 None, sessions 列表，结构与前端 ChatSessionPersisted 一致)。"""
-        row = self._conn.execute(
-            "SELECT value FROM ui_preferences WHERE key = ?",
-            ("active_chat_session_id",),
-        ).fetchone()
-        active_raw = (row["value"] if row else "") or ""
-        active = active_raw.strip() or None
-        cur = self._conn.execute(
-            """
-            SELECT session_id, title, updated_at_ms, payload_json
-            FROM ui_chat_session
-            ORDER BY updated_at_ms DESC
-            """
-        )
-        sessions: list[dict[str, Any]] = []
-        for r in cur.fetchall():
-            try:
-                payload = json.loads(r["payload_json"] or "{}")
-            except json.JSONDecodeError:
-                payload = {}
-            sessions.append(
-                {
-                    "id": r["session_id"],
-                    "title": r["title"] or "新会话",
-                    "updatedAt": int(r["updated_at_ms"] or 0),
-                    "messages": payload.get("messages") or [],
-                    "lastEvidenceEntries": payload.get("lastEvidenceEntries") or [],
-                    "lastCitations": payload.get("lastCitations") or [],
-                }
+    def get_ui_chat_state(self) -> tuple[int, str | None, list[dict[str, Any]]]:
+        """返回 (state_revision, active_session_id, sessions)。"""
+        self._conn.execute("BEGIN")
+        try:
+            pref_rows = self._conn.execute(
+                """
+                SELECT key, value
+                FROM ui_preferences
+                WHERE key IN (?, ?)
+                """,
+                ("active_chat_session_id", "chat_sessions_state_revision"),
+            ).fetchall()
+            prefs = {row["key"]: row["value"] for row in pref_rows}
+            active_raw = prefs.get("active_chat_session_id", "") or ""
+            active = active_raw.strip() or None
+            revision = int(prefs.get("chat_sessions_state_revision", "0") or 0)
+            cur = self._conn.execute(
+                """
+                SELECT session_id, title, updated_at_ms, payload_json
+                FROM ui_chat_session
+                ORDER BY updated_at_ms DESC
+                """
             )
-        return active, sessions
+            sessions: list[dict[str, Any]] = []
+            for r in cur.fetchall():
+                try:
+                    payload = json.loads(r["payload_json"] or "{}")
+                except json.JSONDecodeError:
+                    payload = {}
+                sessions.append(
+                    {
+                        "id": r["session_id"],
+                        "title": r["title"] or "新会话",
+                        "updatedAt": int(r["updated_at_ms"] or 0),
+                        "messages": payload.get("messages") or [],
+                        "lastEvidenceEntries": payload.get("lastEvidenceEntries") or [],
+                        "lastCitations": payload.get("lastCitations") or [],
+                    }
+                )
+            self._conn.commit()
+            return revision, active, sessions
+        except Exception:
+            self._conn.rollback()
+            raise
 
     def put_ui_chat_state(
         self,
         *,
+        expected_revision: int,
         active_session_id: str | None,
         sessions: list[dict[str, Any]],
-    ) -> None:
-        """全量替换 UI 会话表（单用户；事务）。"""
-        self._conn.execute("BEGIN")
+    ) -> int:
+        """按预期版本全量替换 UI 会话表，并返回新版本。"""
+        self._conn.execute("BEGIN IMMEDIATE")
         try:
+            row = self._conn.execute(
+                "SELECT value FROM ui_preferences WHERE key = ?",
+                ("chat_sessions_state_revision",),
+            ).fetchone()
+            current_revision = int((row["value"] if row else "0") or 0)
+            if expected_revision != current_revision:
+                raise ChatStateConflictError(current_revision)
+            new_revision = current_revision + 1
             self._conn.execute("DELETE FROM ui_chat_session")
             for s in sessions:
                 sid = str(s.get("id") or "").strip()
@@ -553,7 +582,15 @@ class SQLiteStore:
                 """,
                 ("active_chat_session_id", active_session_id or ""),
             )
+            self._conn.execute(
+                """
+                INSERT INTO ui_preferences (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                ("chat_sessions_state_revision", str(new_revision)),
+            )
             self._conn.commit()
+            return new_revision
         except Exception:
             self._conn.rollback()
             raise

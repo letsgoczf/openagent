@@ -5,7 +5,7 @@ import uuid
 import pytest
 
 from backend.storage.qdrant_store import QdrantStore
-from backend.storage.sqlite_store import SQLiteStore
+from backend.storage.sqlite_store import ChatStateConflictError, SQLiteStore
 
 
 @pytest.fixture
@@ -140,10 +140,12 @@ def test_qdrant_delete_by_version_ids() -> None:
 
 
 def test_ui_chat_state_roundtrip(sqlite_db: SQLiteStore) -> None:
-    active, sessions = sqlite_db.get_ui_chat_state()
+    revision, active, sessions = sqlite_db.get_ui_chat_state()
+    assert revision == 0
     assert active is None
     assert sessions == []
-    sqlite_db.put_ui_chat_state(
+    revision = sqlite_db.put_ui_chat_state(
+        expected_revision=revision,
         active_session_id="s_1",
         sessions=[
             {
@@ -156,10 +158,62 @@ def test_ui_chat_state_roundtrip(sqlite_db: SQLiteStore) -> None:
             }
         ],
     )
-    active, rows = sqlite_db.get_ui_chat_state()
+    assert revision == 1
+    stored_revision, active, rows = sqlite_db.get_ui_chat_state()
+    assert stored_revision == revision
     assert active == "s_1"
     assert len(rows) == 1
     assert rows[0]["id"] == "s_1"
     assert rows[0]["title"] == "hi"
     assert rows[0]["updatedAt"] == 42
     assert rows[0]["messages"][0]["content"] == "x"
+
+
+def test_ui_chat_state_rejects_stale_full_replacement(tmp_path) -> None:
+    path = tmp_path / "chat-state.db"
+    first = SQLiteStore(path)
+    second = SQLiteStore(path)
+    initial = [
+        {
+            "id": "s_initial",
+            "title": "initial",
+            "updatedAt": 1,
+            "messages": [],
+        }
+    ]
+    newer = [
+        *initial,
+        {
+            "id": "s_new",
+            "title": "new",
+            "updatedAt": 2,
+            "messages": [{"id": "m1", "role": "user", "content": "keep me"}],
+        },
+    ]
+    try:
+        assert first.put_ui_chat_state(
+            expected_revision=0,
+            active_session_id="s_initial",
+            sessions=initial,
+        ) == 1
+        assert second.put_ui_chat_state(
+            expected_revision=1,
+            active_session_id="s_new",
+            sessions=newer,
+        ) == 2
+
+        with pytest.raises(ChatStateConflictError) as exc_info:
+            first.put_ui_chat_state(
+                expected_revision=1,
+                active_session_id="s_initial",
+                sessions=initial,
+            )
+
+        assert exc_info.value.current_revision == 2
+        revision, active, stored = first.get_ui_chat_state()
+        assert revision == 2
+        assert active == "s_new"
+        assert {session["id"] for session in stored} == {"s_initial", "s_new"}
+    finally:
+        first.close()
+        second.close()
