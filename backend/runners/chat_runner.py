@@ -31,7 +31,11 @@ from backend.runners.composer import (
     load_constitution_from_file,
     trim_evidence_entries_to_budget,
 )
-from backend.runners.tool_loop import ToolGatewayStub, chat_until_no_tools, run_tool_loop_round
+from backend.runners.tool_loop import (
+    ToolGatewayStub,
+    format_tool_results_for_llm,
+    run_tool_loop_round,
+)
 from backend.storage.factory import build_qdrant_client
 from backend.storage.qdrant_store import QdrantStore
 from backend.storage.sqlite_store import SQLiteStore
@@ -361,33 +365,32 @@ class ChatRunner:
                 thinking=(answer_thinking.strip() or None) if answer_thinking else None,
             )
 
-        # tool loop 调用（仅当有真实 gateway 且有 tool_calls 时）
+        # tool loop：执行工具 → 把结果回传模型 → 再生成，直到无 tool_calls 或预算耗尽
         if tool_calls and not isinstance(self._tool_gateway, ToolGatewayStub):
-            tc_results = run_tool_loop_round(
-                budget=ctx.budget,
-                blackboard=blackboard,
-                gateway=self._tool_gateway,
-                tool_calls=tool_calls,
-            )
-            # P6: 将每个 tool_call 的开始/结束写入 trace（用于验收与回放）。
-            for idx, (tc, r) in enumerate(zip(tool_calls, tc_results)):
-                tc_id = tc.get("id") or r.get("tool_call_id") or f"tc_{idx}"
-                tool_name = (tc.get("function") or {}).get("name") or r.get("tool") or ""
-                code = r.get("code") or ""
-                payload_preview = str(r.get("payload") or "")[:500]
+            follow_messages = list(messages)
+            pending_calls: list[dict[str, Any]] = list(tool_calls)
+            pending_body = body
 
-                trace.emit(
-                    "tool_call_started",
-                    {
-                        "tool_call_id": tc_id,
-                        "tool": tool_name,
-                        "code": code,
-                        "payload_preview": payload_preview,
-                    },
+            while pending_calls:
+                tc_results = run_tool_loop_round(
+                    budget=ctx.budget,
+                    blackboard=blackboard,
+                    gateway=self._tool_gateway,
+                    tool_calls=pending_calls,
                 )
-                if r.get("result") is True:
+                # 工具预算耗尽时 run_tool_loop_round 返回 []，不能再假装继续
+                if not tc_results:
+                    ctx.mark_degraded("tool_budget_exhausted")
+                    break
+
+                for idx, (tc, r) in enumerate(zip(pending_calls, tc_results)):
+                    tc_id = tc.get("id") or r.get("tool_call_id") or f"tc_{idx}"
+                    tool_name = (tc.get("function") or {}).get("name") or r.get("tool") or ""
+                    code = r.get("code") or ""
+                    payload_preview = str(r.get("payload") or "")[:500]
+
                     trace.emit(
-                        "tool_call_finished",
+                        "tool_call_started",
                         {
                             "tool_call_id": tc_id,
                             "tool": tool_name,
@@ -395,18 +398,124 @@ class ChatRunner:
                             "payload_preview": payload_preview,
                         },
                     )
-                else:
-                    trace.emit(
-                        "tool_call_failed",
-                        {
-                            "tool_call_id": tc_id,
-                            "tool": tool_name,
-                            "code": code,
-                            "payload_preview": payload_preview,
-                        },
+                    if r.get("result") is True:
+                        trace.emit(
+                            "tool_call_finished",
+                            {
+                                "tool_call_id": tc_id,
+                                "tool": tool_name,
+                                "code": code,
+                                "payload_preview": payload_preview,
+                            },
+                        )
+                    else:
+                        trace.emit(
+                            "tool_call_failed",
+                            {
+                                "tool_call_id": tc_id,
+                                "tool": tool_name,
+                                "code": code,
+                                "payload_preview": payload_preview,
+                            },
+                        )
+
+                trace.emit("tool_loop_done", {"tool_calls": len(pending_calls)})
+
+                follow_messages.append(
+                    {
+                        "role": "assistant",
+                        "content": pending_body.strip() or "(tool use)",
+                    }
+                )
+                follow_messages.append(
+                    {
+                        "role": "user",
+                        "content": format_tool_results_for_llm(tc_results),
+                    }
+                )
+
+                if ctx.budget.is_cancelled():
+                    ctx.mark_degraded("user_cancelled")
+                    break
+                if not ctx.budget.can_call_llm() or ctx.budget.token_budget_exceeded():
+                    ctx.mark_degraded("llm_or_token_budget")
+                    break
+
+                try:
+                    raw = self._llm.chat(follow_messages, stream=stream, tools=tools)
+                    next_body = ""
+                    next_thinking: str | None = None
+                    next_tool_calls: list[dict[str, Any]] | None = None
+                    if isinstance(raw, str):
+                        next_body = raw
+                    elif isinstance(raw, ChatResponse):
+                        next_body = raw.content
+                        next_tool_calls = raw.tool_calls or None
+                        if raw.thinking:
+                            next_thinking = raw.thinking
+                            if stream_writer:
+                                for line in raw.thinking.splitlines():
+                                    stream_writer("thinking", line + "\n")
+                    else:
+                        parts: list[str] = []
+                        think_parts: list[str] = []
+                        for item in raw:
+                            if ctx.budget.is_cancelled():
+                                ctx.mark_degraded("user_cancelled")
+                                break
+                            if isinstance(item, tuple):
+                                kind, chunk = item[0], item[1]
+                                if kind == "content":
+                                    parts.append(chunk)
+                                elif kind == "thinking":
+                                    think_parts.append(chunk)
+                                elif kind == "tool_calls":
+                                    import json
+
+                                    try:
+                                        next_tool_calls = (
+                                            json.loads(chunk)
+                                            if isinstance(chunk, str)
+                                            else chunk
+                                        )
+                                    except (json.JSONDecodeError, TypeError):
+                                        next_tool_calls = None
+                                if stream_writer:
+                                    stream_writer(kind, chunk)
+                            else:
+                                parts.append(str(item))
+                                if stream_writer:
+                                    stream_writer("content", str(item))
+                        next_body = "".join(parts)
+                        if think_parts:
+                            next_thinking = "".join(think_parts)
+                except Exception as e:  # noqa: BLE001
+                    ctx.mark_degraded(f"llm_error:{e}")
+                    trace.emit("completed", {"degraded": True, "error": str(e)})
+                    return ChatRunResult(
+                        answer=f"[LLM error: {e}]\n",
+                        citations=cite_for_ui,
+                        evidence_entries=trimmed_entries,
+                        degraded=True,
+                        run_id=ctx.run_id,
+                        retrieval_state=rr.retrieval_state,
+                        degrade_reason=str(e),
+                        thinking=(answer_thinking.strip() or None) if answer_thinking else None,
                     )
 
-            trace.emit("tool_loop_done", {"tool_calls": len(tool_calls)})
+                ctx.budget.record_llm_call()
+                body = next_body
+                if next_thinking:
+                    answer_thinking = (
+                        f"{answer_thinking}\n{next_thinking}"
+                        if answer_thinking
+                        else next_thinking
+                    )
+                pending_body = next_body
+                pending_calls = list(next_tool_calls) if next_tool_calls else []
+
+                if ctx.budget.is_cancelled():
+                    break
 
         body_stripped = body.strip()
         full_answer = body_stripped
