@@ -52,15 +52,26 @@ async def put_chat_sessions_state(body: ChatSessionsStateDTO) -> dict[str, bool]
             message="sessions must not be empty",
             status_code=400,
         )
-    ids = {s.id for s in body.sessions}
-    if len(ids) != len(body.sessions):
-        raise ApiException(
-            code="chat_sessions.duplicate_id",
-            message="duplicate session id",
-            status_code=400,
-        )
-    active = body.activeSessionId
-    if active and active not in ids:
+    normalized: list[ChatSessionPersistedDTO] = []
+    seen: set[str] = set()
+    for session in body.sessions:
+        sid = session.id.strip()
+        if not sid:
+            raise ApiException(
+                code="chat_sessions.blank_id",
+                message="session id must not be blank",
+                status_code=400,
+            )
+        if sid in seen:
+            raise ApiException(
+                code="chat_sessions.duplicate_id",
+                message="duplicate session id",
+                status_code=400,
+            )
+        seen.add(sid)
+        normalized.append(session.model_copy(update={"id": sid}))
+    active = body.activeSessionId.strip() if body.activeSessionId else None
+    if active and active not in seen:
         raise ApiException(
             code="chat_sessions.bad_active",
             message="activeSessionId must refer to an existing session",
@@ -69,7 +80,7 @@ async def put_chat_sessions_state(body: ChatSessionsStateDTO) -> dict[str, bool]
     cfg = load_config()
     sqlite = SQLiteStore(cfg.storage.sqlite_path)
     try:
-        rows = [s.model_dump(mode="json") for s in body.sessions]
+        rows = [s.model_dump(mode="json") for s in normalized]
         sqlite.put_ui_chat_state(active_session_id=active, sessions=rows)
         return {"ok": True}
     finally:

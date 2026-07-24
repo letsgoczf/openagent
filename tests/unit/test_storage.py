@@ -163,3 +163,24 @@ def test_ui_chat_state_roundtrip(sqlite_db: SQLiteStore) -> None:
     assert rows[0]["title"] == "hi"
     assert rows[0]["updatedAt"] == 42
     assert rows[0]["messages"][0]["content"] == "x"
+
+
+def test_put_ui_chat_state_rejects_empty_session_list(sqlite_db: SQLiteStore) -> None:
+    sqlite_db.put_ui_chat_state(
+        active_session_id="s_1",
+        sessions=[
+            {
+                "id": "s_1",
+                "title": "hi",
+                "updatedAt": 1,
+                "messages": [],
+                "lastEvidenceEntries": [],
+                "lastCitations": [],
+            }
+        ],
+    )
+    with pytest.raises(ValueError, match="empty"):
+        sqlite_db.put_ui_chat_state(active_session_id=None, sessions=[])
+    active, rows = sqlite_db.get_ui_chat_state()
+    assert active == "s_1"
+    assert len(rows) == 1
