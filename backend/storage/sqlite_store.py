@@ -524,27 +524,42 @@ class SQLiteStore:
         active_session_id: str | None,
         sessions: list[dict[str, Any]],
     ) -> None:
-        """全量替换 UI 会话表（单用户；事务）。"""
+        """全量替换 UI 会话表（单用户；事务）。
+
+        空白 / 仅空白字符的 session_id 会被拒绝，避免 DELETE 后无法 INSERT 造成全表清空。
+        """
+        prepared: list[tuple[str, str, int, str]] = []
+        seen: set[str] = set()
+        for s in sessions:
+            sid = str(s.get("id") or "").strip()
+            if not sid:
+                raise ValueError("ui chat session id must not be blank")
+            if sid in seen:
+                raise ValueError(f"duplicate ui chat session id: {sid}")
+            seen.add(sid)
+            title = str(s.get("title") or "新会话")
+            updated = int(s.get("updatedAt") or 0)
+            payload = {
+                "messages": s.get("messages") or [],
+                "lastEvidenceEntries": s.get("lastEvidenceEntries") or [],
+                "lastCitations": s.get("lastCitations") or [],
+            }
+            prepared.append(
+                (sid, title, updated, json.dumps(payload, ensure_ascii=False))
+            )
+        if not prepared:
+            raise ValueError("ui chat sessions must not be empty")
+
         self._conn.execute("BEGIN")
         try:
             self._conn.execute("DELETE FROM ui_chat_session")
-            for s in sessions:
-                sid = str(s.get("id") or "").strip()
-                if not sid:
-                    continue
-                title = str(s.get("title") or "新会话")
-                updated = int(s.get("updatedAt") or 0)
-                payload = {
-                    "messages": s.get("messages") or [],
-                    "lastEvidenceEntries": s.get("lastEvidenceEntries") or [],
-                    "lastCitations": s.get("lastCitations") or [],
-                }
+            for sid, title, updated, payload_json in prepared:
                 self._conn.execute(
                     """
                     INSERT INTO ui_chat_session (session_id, title, updated_at_ms, payload_json)
                     VALUES (?, ?, ?, ?)
                     """,
-                    (sid, title, updated, json.dumps(payload, ensure_ascii=False)),
+                    (sid, title, updated, payload_json),
                 )
             self._conn.execute(
                 """

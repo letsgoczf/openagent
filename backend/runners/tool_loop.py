@@ -68,6 +68,21 @@ def run_tool_loop_round(
     return results
 
 
+def format_tool_results_for_llm(results: list[dict[str, Any]], *, max_chars: int = 8000) -> str:
+    """将 tool 执行结果格式化为可回传给模型的用户消息正文。"""
+    compact = [
+        {
+            "tool_call_id": r.get("tool_call_id"),
+            "tool": r.get("tool"),
+            "success": bool(r.get("result")),
+            "code": r.get("code"),
+            "payload": r.get("payload"),
+        }
+        for r in results
+    ]
+    return "Tool results:\n" + json.dumps(compact, ensure_ascii=False)[:max_chars]
+
+
 def chat_until_no_tools(
     *,
     messages: list[dict[str, str]],
@@ -78,36 +93,39 @@ def chat_until_no_tools(
     max_tool_rounds: int | None = None,
 ) -> str:
     """
-    若 LLM 返回 tool_calls，则执行网关并把结果以 ``role=user`` 追加（简化协议）。
+    若 LLM 返回 tool_calls，则执行网关并把**实际工具结果**以 ``role=user`` 追加后继续生成。
     ``gateway=None`` 时默认使用 ToolGatewayStub（兼容 P4 行为）。
     """
     gw = gateway or ToolGatewayStub()
     cap = max_tool_rounds if max_tool_rounds is not None else budget.max_tool_rounds
     rounds = 0
     current = list(messages)
+    text = ""
 
     while rounds <= cap:
         if not budget.can_call_llm():
             blackboard.append("tool", "llm_budget_exhausted", {})
-            return ""
+            return text or ""
         text, tool_calls = llm_complete(current)
         budget.record_llm_call()
 
         if not tool_calls:
             return text
 
-        run_tool_loop_round(
+        tc_results = run_tool_loop_round(
             budget=budget,
             blackboard=blackboard,
             gateway=gw,
             tool_calls=tool_calls,
         )
+        if not tc_results:
+            # 工具预算耗尽：不再假装继续，直接返回本轮文本
+            return text or ""
         current.append({"role": "assistant", "content": text or "(tool use)"})
         current.append(
             {
                 "role": "user",
-                "content": "Tool results: "
-                + json.dumps(tool_calls, ensure_ascii=False)[:2000],
+                "content": format_tool_results_for_llm(tc_results),
             }
         )
         rounds += 1

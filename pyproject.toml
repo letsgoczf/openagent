@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.32",
     "websockets>=13",
     "openai>=1.40",
     "ollama>=0.3",
