@@ -12,6 +12,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "websockets>=13",
+    "python-multipart>=0.0.32",
     "openai>=1.40",
     "ollama>=0.3",
     "tiktoken>=0.7",

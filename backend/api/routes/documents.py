@@ -37,22 +37,36 @@ def _run_document_import_job(
     filename: str,
     file_type: str,
 ) -> None:
-    cfg = load_config()
-    sqlite = SQLiteStore(cfg.storage.sqlite_path)
+    """Import worker.
 
-    dim = _resolve_embedding_dim(cfg)
-    qclient = build_qdrant_client(cfg.storage.qdrant)
-    qdrant = QdrantStore(cfg.storage.qdrant.collection_name, vector_size=dim, client=qclient)
-
-    trace = TraceWriter(sqlite, job_id)
-    tokenizer = create_tokenizer_service(cfg)
-
-    doc_id = str(uuid.uuid4())
-    version_id = str(uuid.uuid4())
-    content_hash = hashlib.sha256(file_bytes).hexdigest()
-    extraction_version = "v1"
-
+    Setup (embedding probe, Qdrant open, tokenizer) must run inside the same
+    failure boundary as the import body. Otherwise the API has already returned
+    ``queued`` but no ``job_*`` trace is written, and ``GET /v1/jobs/{id}``
+    stays ``queued`` forever.
+    """
+    sqlite: SQLiteStore | None = None
+    qdrant: QdrantStore | None = None
+    trace: TraceWriter | None = None
+    version_id: str | None = None
     try:
+        cfg = load_config()
+        sqlite = SQLiteStore(cfg.storage.sqlite_path)
+        trace = TraceWriter(sqlite, job_id)
+
+        dim = _resolve_embedding_dim(cfg)
+        qclient = build_qdrant_client(cfg.storage.qdrant)
+        qdrant = QdrantStore(
+            cfg.storage.qdrant.collection_name,
+            vector_size=dim,
+            client=qclient,
+        )
+        tokenizer = create_tokenizer_service(cfg)
+
+        doc_id = str(uuid.uuid4())
+        version_id = str(uuid.uuid4())
+        content_hash = hashlib.sha256(file_bytes).hexdigest()
+        extraction_version = "v1"
+
         trace.emit("job_started", {"filename": filename, "file_type": file_type})
 
         # 先写入 document/document_version，后续 chunk 外键依赖 document_version
@@ -169,14 +183,22 @@ def _run_document_import_job(
         sqlite.update_document_version_status(version_id, status="completed")
         trace.emit("job_completed", {"doc_id": doc_id, "version_id": version_id})
     except Exception as e:  # noqa: BLE001
-        trace.emit("job_failed", {"error": str(e)})
-        try:
-            sqlite.update_document_version_status(version_id, status="failed")
-        except Exception:  # noqa: BLE001
-            pass
+        if sqlite is not None:
+            try:
+                emitter = trace or TraceWriter(sqlite, job_id)
+                emitter.emit("job_failed", {"error": str(e)})
+            except Exception:  # noqa: BLE001
+                pass
+            if version_id is not None:
+                try:
+                    sqlite.update_document_version_status(version_id, status="failed")
+                except Exception:  # noqa: BLE001
+                    pass
     finally:
-        qdrant.close()
-        sqlite.close()
+        if qdrant is not None:
+            qdrant.close()
+        if sqlite is not None:
+            sqlite.close()
 
 
 @router.post("/import", response_model=dict)
