@@ -306,13 +306,14 @@ class ChatRunner:
                         elif kind == "thinking":
                             think_parts.append(chunk)
                         elif kind == "tool_calls":
-                            # 流尾携带 tool_calls 数据
+                            # 流尾携带 tool_calls 数据（仅供后续 tool loop；勿当 content 推给前端）
                             import json
                             try:
                                 tool_calls = json.loads(chunk) if isinstance(chunk, str) else chunk
                             except (json.JSONDecodeError, TypeError):
                                 tool_calls = None
-                        if stream_writer:
+                        # tool_calls 是结构化控制面，写入 chat.delta 会污染助手正文
+                        if stream_writer and kind != "tool_calls" and isinstance(chunk, str):
                             stream_writer(kind, chunk)
                     else:
                         parts.append(str(item))
