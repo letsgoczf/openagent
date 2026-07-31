@@ -128,7 +128,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
         delta_stream_state = {"run_id": None}
 
         def stream_writer(kind: str, text: str) -> None:
-            # kind: thinking/content/citations
+            # kind: thinking/content/citations（tool_calls 不得落入 content）
+            if kind == "tool_calls":
+                return
             rid = delta_stream_state["run_id"] or "pending"
 
             if kind == "thinking":
@@ -149,7 +151,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                         "delta": text,
                     }
                 )
-            else:
+            elif kind == "content":
                 enqueue(
                     {
                         "type": "chat.delta",
@@ -158,6 +160,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
                         "delta": text,
                     }
                 )
+            else:
+                # 未知 kind 不回退成 content，避免控制面/结构化载荷污染正文
+                return
 
         cancel_ev = threading.Event()
         budget = Budget(cancel_event=cancel_ev)
