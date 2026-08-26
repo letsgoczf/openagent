@@ -32,6 +32,10 @@ import {
   stripEmbeddedThinkingBlock,
   stripLegacyCitationsAppendix,
 } from "@/lib/stripLegacyCitationsAppendix";
+import {
+  claimSendQuerySlot,
+  releaseSendQuerySlot,
+} from "@/lib/sendQueryGuard";
 import { readWsPayload, subAgentTaskSummary } from "@/lib/wsPayload";
 
 export type ChatStatus = "idle" | "connecting" | "streaming" | "done" | "error";
@@ -163,6 +167,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const activeRequestIdRef = useRef<string | null>(null);
   const persistSkipRef = useRef(true);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Sync overlap guard: React `status` is too late to stop double-submit. */
+  const queryInFlightRef = useRef(false);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -344,6 +350,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     (query: string) => {
       const q = query.trim();
       if (!q) return;
+      const sid = activeSessionIdRef.current;
+      if (!sid) return;
+      if (!claimSendQuerySlot(queryInFlightRef)) return;
       const prevWs = wsRef.current;
       if (prevWs) {
         try {
@@ -355,9 +364,6 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       }
       streamingSessionIdRef.current = null;
       activeRequestIdRef.current = null;
-
-      const sid = activeSessionIdRef.current;
-      if (!sid) return;
 
       const clientRequestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
       streamingSessionIdRef.current = sid;
@@ -583,6 +589,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           const streamSid = streamingSessionIdRef.current;
           streamingSessionIdRef.current = null;
           activeRequestIdRef.current = null;
+          releaseSendQuerySlot(queryInFlightRef);
 
           const answer = normalizeAnswerText(data.answer);
           const rawFinal = assistantRef.current || answer;
@@ -638,6 +645,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         if (t === "chat.failed") {
           streamingSessionIdRef.current = null;
           activeRequestIdRef.current = null;
+          releaseSendQuerySlot(queryInFlightRef);
           setStreamingCitations([]);
           const msg =
             (data.error as { message?: string } | undefined)?.message ??
@@ -651,13 +659,16 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       ws.onerror = () => {
         streamingSessionIdRef.current = null;
         activeRequestIdRef.current = null;
+        releaseSendQuerySlot(queryInFlightRef);
         setStreamingCitations([]);
         setError("WebSocket error");
         setStatus("error");
       };
 
       ws.onclose = () => {
-        wsRef.current = null;
+        if (wsRef.current === ws) {
+          wsRef.current = null;
+        }
       };
     },
     [appendTrace]
@@ -676,6 +687,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       wsRef.current = null;
       streamingSessionIdRef.current = null;
       activeRequestIdRef.current = null;
+      releaseSendQuerySlot(queryInFlightRef);
       resetEphemeral();
       setStatus("idle");
       return;
@@ -706,6 +718,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     }
     streamingSessionIdRef.current = null;
     activeRequestIdRef.current = null;
+    releaseSendQuerySlot(queryInFlightRef);
     setSessions((prev) =>
       prev.map((s) =>
         s.id === sid
