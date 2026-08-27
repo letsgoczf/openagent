@@ -23,6 +23,7 @@ import {
   loadChatSessionsFile,
   type ChatSessionPersisted,
 } from "@/lib/chatSessionPersistence";
+import { buildChatSessionsPersistBody } from "@/lib/chatSessionPersist";
 import {
   fetchChatSessionsState,
   putChatSessionsState,
@@ -162,11 +163,54 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   /** 与当前 WebSocket 轮次对齐，丢弃旧连接晚到的 chat.* 事件，避免污染新会话侧栏 */
   const activeRequestIdRef = useRef<string | null>(null);
   const persistSkipRef = useRef(true);
+  const persistDirtyRef = useRef(false);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sessionsRef = useRef<ChatSessionPersisted[]>(sessions);
+  const sessionsReadyRef = useRef(false);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
+
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
+
+  useEffect(() => {
+    sessionsReadyRef.current = sessionsReady;
+  }, [sessionsReady]);
+
+  const closeActiveSocket = useCallback(() => {
+    const w = wsRef.current;
+    if (!w) return;
+    try {
+      w.close();
+    } catch {
+      /* ignore */
+    }
+    wsRef.current = null;
+  }, []);
+
+  const flushSessionsPersist = useCallback((opts?: { keepalive?: boolean }) => {
+    if (persistTimerRef.current) {
+      clearTimeout(persistTimerRef.current);
+      persistTimerRef.current = null;
+    }
+    const body = buildChatSessionsPersistBody({
+      persistSkip: persistSkipRef.current,
+      persistDirty: persistDirtyRef.current,
+      sessionsReady: sessionsReadyRef.current,
+      activeSessionId: activeSessionIdRef.current,
+      sessions: sessionsRef.current,
+    });
+    persistDirtyRef.current = false;
+    if (!body) return;
+    void putChatSessionsState(body, { keepalive: opts?.keepalive }).catch(
+      (err) => {
+        console.error("chat sessions persist", err);
+      }
+    );
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -237,16 +281,23 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     }
     if (persistSkipRef.current) {
       persistSkipRef.current = false;
+      persistDirtyRef.current = false;
       return;
     }
     if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
+    persistDirtyRef.current = true;
     persistTimerRef.current = setTimeout(() => {
       persistTimerRef.current = null;
-      void putChatSessionsState({
-        version: CHAT_SESSIONS_VERSION,
+      const body = buildChatSessionsPersistBody({
+        persistSkip: persistSkipRef.current,
+        persistDirty: persistDirtyRef.current,
+        sessionsReady: true,
         activeSessionId,
         sessions,
-      }).catch((err) => {
+      });
+      persistDirtyRef.current = false;
+      if (!body) return;
+      void putChatSessionsState(body).catch((err) => {
         console.error("chat sessions persist", err);
       });
     }, 450);
@@ -257,6 +308,19 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       }
     };
   }, [sessions, activeSessionId, sessionsReady]);
+
+  useEffect(() => {
+    const onPageHide = () => {
+      flushSessionsPersist({ keepalive: true });
+      closeActiveSocket();
+    };
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      window.removeEventListener("pagehide", onPageHide);
+      flushSessionsPersist();
+      closeActiveSocket();
+    };
+  }, [closeActiveSocket, flushSessionsPersist]);
 
   const sessionView = useMemo(() => {
     const active = sessions.find((s) => s.id === activeSessionId) ?? null;
