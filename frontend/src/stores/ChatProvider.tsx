@@ -27,7 +27,8 @@ import {
   fetchChatSessionsState,
   putChatSessionsState,
 } from "@/lib/chatSessionsApi";
-import { wsUrl } from "@/lib/api";
+import { apiBase, wsUrl } from "@/lib/api";
+import { isSafeChatSessionsPersist } from "@/lib/chatSessionPersistGuard";
 import {
   stripEmbeddedThinkingBlock,
   stripLegacyCitationsAppendix,
@@ -163,6 +164,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const activeRequestIdRef = useRef<string | null>(null);
   const persistSkipRef = useRef(true);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** GET 失败时本地会塞一个空会话；绝不能把该快照 PUT 回服务端（全量替换会清空历史）。 */
+  const hydrateSucceededRef = useRef(false);
+  const hydratedApiBaseRef = useRef<string | null>(null);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -183,6 +187,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             activeOk ? remote.activeSessionId! : remote.sessions[0]!.id
           );
           clearLegacyChatSessionsStorage();
+          hydrateSucceededRef.current = true;
+          hydratedApiBaseRef.current = apiBase();
         } else {
           const legacy = loadChatSessionsFile();
           if (legacy && legacy.sessions.length > 0) {
@@ -191,6 +197,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             clearLegacyChatSessionsStorage();
             setSessions(legacy.sessions);
             setActiveSessionId(legacy.activeSessionId);
+            hydrateSucceededRef.current = true;
+            hydratedApiBaseRef.current = apiBase();
           } else {
             const s = createEmptySession();
             const initial: ChatSessionPersisted[] = [s];
@@ -202,9 +210,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             if (cancelled) return;
             setSessions(initial);
             setActiveSessionId(s.id);
+            hydrateSucceededRef.current = true;
+            hydratedApiBaseRef.current = apiBase();
           }
         }
       } catch (e) {
+        hydrateSucceededRef.current = false;
+        hydratedApiBaseRef.current = null;
         if (!cancelled) {
           console.error(e);
           setError(
@@ -235,6 +247,19 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     if (!sessions.some((s) => s.id === activeSessionId)) {
       return;
     }
+    if (
+      !isSafeChatSessionsPersist({
+        hydrateSucceeded: hydrateSucceededRef.current,
+        hydratedApiBase: hydratedApiBaseRef.current,
+        currentApiBase: apiBase(),
+        sessionsReady: true,
+        activeSessionId,
+        sessions,
+      })
+    ) {
+      if (persistSkipRef.current) persistSkipRef.current = false;
+      return;
+    }
     if (persistSkipRef.current) {
       persistSkipRef.current = false;
       return;
@@ -242,6 +267,18 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
     persistTimerRef.current = setTimeout(() => {
       persistTimerRef.current = null;
+      if (
+        !isSafeChatSessionsPersist({
+          hydrateSucceeded: hydrateSucceededRef.current,
+          hydratedApiBase: hydratedApiBaseRef.current,
+          currentApiBase: apiBase(),
+          sessionsReady: true,
+          activeSessionId,
+          sessions,
+        })
+      ) {
+        return;
+      }
       void putChatSessionsState({
         version: CHAT_SESSIONS_VERSION,
         activeSessionId,
