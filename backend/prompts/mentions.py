@@ -3,8 +3,11 @@ from __future__ import annotations
 import re
 from collections.abc import Collection
 
-# 与 prompts/<id>.agent.md 的常见文件名一致：字母数字、下划线、连字符
-_MENTION = re.compile(r"@([a-zA-Z0-9][a-zA-Z0-9_-]*)")
+# 与 prompts/<id>.agent.md 的常见文件名一致：字母数字、下划线、连字符。
+# 必须是独立 token，不能落在邮箱中间（user@incident.com）或 @id.domain 上。
+_MENTION = re.compile(
+    r"(?<![A-Za-z0-9._])@([a-zA-Z0-9][a-zA-Z0-9_-]*)(?!\.[A-Za-z])"
+)
 
 
 def extract_forced_agent_templates(
@@ -16,7 +19,8 @@ def extract_forced_agent_templates(
     从用户原文中提取 ``@<id>``（仅当 id 在目录中存在时视为 agent 模板）。
 
     返回 (按出现顺序去重后的 id 列表, 去掉这些 @mention 后的正文)。
-    未知的 ``@词`` 保留在正文中（避免误伤邮箱等，且 id 不在目录时视为普通文本）。
+    未知的 ``@词`` 保留在正文中。邮箱（``alerts@incident.io``）即使 local/domain
+    与目录 id 相同也不视为 mention，避免改写提问并污染 session memory。
     """
     raw = text.strip()
     allowed = frozenset(allowed_ids)

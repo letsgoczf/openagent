@@ -183,6 +183,40 @@ def test_extract_email_not_stripped_without_catalog_id() -> None:
     assert "user@gmail.com" in cleaned
 
 
+def test_extract_email_not_stripped_when_domain_matches_catalog_id() -> None:
+    """默认目录含 incident/grant/memory 等 id；邮箱域名撞 id 不得改写提问。"""
+    allowed = frozenset({"incident", "grant", "memory", "protocol", "ethics"})
+    raw = (
+        "把报告发给 alerts@incident.io 和 ops@grant.org，"
+        "并抄送 oncall@memory.net / team@protocol.com / board@ethics.edu"
+    )
+    ids, cleaned = extract_forced_agent_templates(raw, allowed_ids=allowed)
+    assert ids == []
+    assert cleaned == raw
+
+
+def test_extract_email_local_part_at_catalog_id_without_tld() -> None:
+    allowed = frozenset({"grant"})
+    ids, cleaned = extract_forced_agent_templates(
+        "contact foo@grant please",
+        allowed_ids=allowed,
+    )
+    assert ids == []
+    assert "foo@grant" in cleaned
+
+
+def test_extract_standalone_mention_still_forced() -> None:
+    allowed = frozenset({"incident", "grant"})
+    ids, cleaned = extract_forced_agent_templates(
+        "@incident 请分析这次故障，抄送 ops@grant.org",
+        allowed_ids=allowed,
+    )
+    assert ids == ["incident"]
+    assert cleaned == "请分析这次故障，抄送 ops@grant.org"
+    assert "@incident" not in cleaned
+    assert "ops@grant.org" in cleaned
+
+
 def test_plan_prompt_disabled_no_llm() -> None:
     s = _settings_pm_enabled()
     s = s.model_copy(update={"prompt_management": PromptManagementConfig(enabled=False)})
