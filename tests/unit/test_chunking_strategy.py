@@ -19,6 +19,15 @@ def test_chunking_respects_budget_and_overlap() -> None:
     assert len(set(t0[-20:]).intersection(set(t1[:40]))) >= 1
 
 
+def test_chunking_preserves_tiktoken_special_token_text() -> None:
+    tok = TokenizerService(encoding_name="cl100k_base")
+    text = "prompt dump\n\n<|endoftext|>\n\n<|im_start|>system\n\nnext page"
+    chunks = chunk_text_by_tokens(text, tok, max_chunk_tokens=800, overlap_tokens=0)
+    joined = "\n".join(chunks)
+    assert "<|endoftext|>" in joined
+    assert "<|im_start|>system" in joined
+
+
 def test_chunking_keeps_markdown_headers_as_blocks() -> None:
     tok = TokenizerService(model_id="gpt-4o-mini")
     text = "# Title\n\npara one " + ("x " * 120) + "\n\n## Section\n\npara two " + ("y " * 120)

@@ -22,6 +22,24 @@ def test_tokenizer_evidence_v1_same_as_count() -> None:
     assert t.count_evidence_entry_tokens_v1(s) == t.count_tokens(s)
 
 
+def test_tokenizer_counts_tiktoken_special_tokens_as_text() -> None:
+    """cl100k special tokens must not raise; decode must keep the original text.
+
+    Default ``encode()`` raises ValueError on these strings, which aborts chat
+    memory writes and document chunking.
+    """
+    t = TokenizerService(encoding_name="cl100k_base")
+    samples = (
+        "请解释 <|endoftext|> 这个标记",
+        "fill <|fim_prefix|> code <|fim_suffix|> here <|fim_middle|>",
+        "<|endofprompt|>",
+    )
+    for s in samples:
+        n = t.count_tokens(s)
+        assert n > 0
+        assert t.decode(t.encode(s)) == s
+
+
 def test_factory_tokenizer_uses_config() -> None:
     from backend.config_loader import OpenAgentSettings, GenerationConfig, ModelsConfig
     from backend.config_loader import TokenizationConfig

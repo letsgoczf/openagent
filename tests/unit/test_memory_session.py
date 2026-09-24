@@ -54,6 +54,20 @@ def test_build_messages_with_conversation_history() -> None:
     assert "USER QUESTION:\nQ2" in msgs[3]["content"]
 
 
+def test_persist_turn_with_tiktoken_special_tokens() -> None:
+    """Memory write runs after a successful answer; special tokens must not abort it."""
+    tok = TokenizerService(encoding_name="cl100k_base")
+    cfg = MemoryConfig(enabled=True, session_max_turns=8, session_max_history_tokens=8000)
+    user = "导出的对话在结尾写了 <|endoftext|>"
+    assistant = "这个标记是 <|endoftext|>，不是正文结束。"
+    with tempfile.TemporaryDirectory() as td:
+        store = SQLiteStore(Path(td) / "t.db")
+        persist_user_assistant_turns(store, cfg, "sess_special", "run_s", user, assistant, tok)
+        hist, _summary = fetch_history_messages(store, cfg, "sess_special", tok)
+        assert [m["content"] for m in hist] == [user, assistant]
+        store.close()
+
+
 def test_fetch_and_persist_roundtrip() -> None:
     tok = TokenizerService(model_id="gpt-4o-mini")
     cfg = MemoryConfig(

@@ -33,13 +33,20 @@ class TokenizerService:
     def count_tokens(self, text: str) -> int:
         if not text:
             return 0
-        return len(self._enc.encode(text))
+        return len(self.encode(text))
 
     def encode(self, text: str) -> list[int]:
-        """Return token ids for `text` using configured encoding."""
+        """Return token ids for `text` using configured encoding.
+
+        tiktoken raises ValueError when text contains a special token such as
+        ``<|endoftext|>`` unless those tokens are explicitly allowed. Chat
+        transcripts, model output, and imported documents often include them.
+        Treat them as ordinary characters so counting and chunking cannot abort
+        a turn or an import.
+        """
         if not text:
             return []
-        return list(self._enc.encode(text))
+        return list(self._enc.encode(text, disallowed_special=()))
 
     def decode(self, tokens: list[int]) -> str:
         """Decode token ids back into text."""
