@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from backend.models.factory import create_tokenizer_service
+from backend.models.ollama_adapter import OllamaAdapter
 from backend.models.openai_adapter import OpenAIAdapter
 from backend.models.tokenizer import TokenizerService
 
@@ -61,3 +62,55 @@ def test_openai_adapter_streams_deltas() -> None:
         create_mock.assert_called_once()
         call_kw = create_mock.call_args.kwargs
         assert call_kw["stream"] is True
+
+
+def _ollama_message(content: str, thinking: str = "") -> MagicMock:
+    msg = MagicMock()
+    msg.content = content
+    msg.thinking = thinking
+    msg.tool_calls = None
+    resp = MagicMock()
+    resp.message = msg
+    return resp
+
+
+def test_budgeted_ollama_chat_disables_thinking() -> None:
+    """Token-capped calls must not spend num_predict on a thinking trace."""
+    with patch("backend.models.ollama_adapter.ollama.Client") as client_cls:
+        instance = MagicMock()
+        instance.chat.return_value = _ollama_message('{"need_retrieval": true}')
+        client_cls.return_value = instance
+
+        ad = OllamaAdapter(
+            "qwen",
+            base_url="http://127.0.0.1:11434",
+            think=True,
+        )
+        out = ad.chat(
+            [{"role": "user", "content": "员工手册里年假有几天"}],
+            stream=False,
+            max_tokens=80,
+        )
+
+    kwargs = instance.chat.call_args.kwargs
+    assert kwargs["think"] is False
+    assert kwargs["options"]["num_predict"] == 80
+    assert out.content == '{"need_retrieval": true}'
+
+
+def test_uncapped_ollama_chat_keeps_thinking() -> None:
+    with patch("backend.models.ollama_adapter.ollama.Client") as client_cls:
+        instance = MagicMock()
+        instance.chat.return_value = _ollama_message("answer", thinking="trace")
+        client_cls.return_value = instance
+
+        ad = OllamaAdapter(
+            "qwen",
+            base_url="http://127.0.0.1:11434",
+            think=True,
+        )
+        ad.chat([{"role": "user", "content": "hi"}], stream=False)
+
+    kwargs = instance.chat.call_args.kwargs
+    assert kwargs["think"] is True
+    assert "num_predict" not in kwargs.get("options", {})
