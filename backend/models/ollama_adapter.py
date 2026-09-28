@@ -67,6 +67,16 @@ class OllamaAdapter(LLMAdapter):
             kwargs["tools"] = tools
         if self._think is not None:
             kwargs["think"] = self._think
+        # Ollama counts thinking tokens toward ``num_predict``. Capped calls
+        # (retrieval router, consolidation, planner) pass ``max_tokens`` as that
+        # budget. With ``think`` left on, a thinking model can exhaust the cap
+        # before ``content`` exists. Default config pairs ``think: true`` with an
+        # 80-token adaptive router and fail-closed retrieval, so the JSON decision
+        # never arrives and document search is skipped. Disable thinking whenever
+        # the caller set a token cap so the budget applies to the required output.
+        # Uncapped chat (the user-visible answer) still uses ``self._think``.
+        if max_tokens is not None:
+            kwargs["think"] = False
 
         if stream:
             return self._stream_gen(**kwargs)
