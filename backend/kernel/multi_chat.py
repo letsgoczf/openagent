@@ -36,6 +36,14 @@ def _dedupe_evidence(entries: list[EvidenceEntry]) -> list[EvidenceEntry]:
     return out
 
 
+def _synthesizer_answer_unusable(text: str) -> bool:
+    """Synthesizer 没有产出可用终稿（空串或 runner 内部吞掉的降级/错误占位）。"""
+    t = text.strip()
+    if not t:
+        return True
+    return t.startswith("[Degraded:") or t.startswith("[LLM error:")
+
+
 def run_sequential_two_agent(
     *,
     runner: ChatRunner,
@@ -188,6 +196,35 @@ def run_sequential_two_agent(
             "output_summary": (r2.answer or "")[:800],
         },
     )
+
+    r1_text = (r1.answer or "").strip()
+    r2_text = (r2.answer or "").strip()
+    # Analyst 流被静音。Synthesizer 若在墙钟、上下文超限或 LLM 异常时只返回空串/占位错误，
+    # 不能用它覆盖已经生成的草稿，否则用户会看到空白或 “[LLM error]”。
+    if r1_text and _synthesizer_answer_unusable(r2_text):
+        trace.emit(
+            "merge_started",
+            {
+                "strategy": "fallback_analyst_only",
+                "reason": r2.degrade_reason or "empty_or_placeholder_answer",
+                "sub_agents": ["sub_analyst", "sub_synthesizer"],
+            },
+        )
+        return ChatRunResult(
+            answer=r1.answer,
+            citations=r1.citations,
+            evidence_entries=r1.evidence_entries,
+            degraded=r1.degraded,
+            run_id=ctx.run_id,
+            retrieval_state={
+                "multi_agent": True,
+                "analyst": r1.retrieval_state,
+                "synthesizer": r2.retrieval_state,
+                "synthesizer_fallback": r2.degrade_reason or "empty_or_placeholder_answer",
+            },
+            degrade_reason=r1.degrade_reason,
+            thinking=r1.thinking,
+        )
 
     trace.emit(
         "merge_started",
